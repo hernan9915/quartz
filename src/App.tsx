@@ -674,7 +674,7 @@ function TitleBar({ logo, onOpenSettings, settingsActive, albumCount, artistCoun
           Quartz
         </span>
         <span className="mono" style={{ fontSize: 9, color: "var(--text-faint)", letterSpacing: "0.18em", marginLeft: 4 }}>
-          v2.1
+          v{__APP_VERSION__}
         </span>
       </div>
 
