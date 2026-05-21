@@ -15,7 +15,12 @@ param(
   [string]$Notes = ""
 )
 
-$ErrorActionPreference = "Stop"
+# Native commands (npm, cargo, tauri) write informational text to stderr
+# all the time. Setting ErrorActionPreference = "Stop" makes PowerShell
+# wrap every stderr line as a terminating error and abort the script on
+# the very first "Info" line tauri emits. Keep it on "Continue" (the
+# default) and rely on the explicit $LASTEXITCODE checks below.
+$ErrorActionPreference = "Continue"
 
 # Always pull the signing creds from User-scope so a fresh shell
 # (which Windows doesn't always re-propagate User env vars to)
