@@ -64,7 +64,12 @@ $manifest = [ordered]@{
 }
 
 $outPath = Join-Path $nsisDir "latest.json"
-$manifest | ConvertTo-Json -Depth 6 | Set-Content $outPath -Encoding utf8
+# Write without BOM — PowerShell 5.1's `-Encoding utf8` writes WITH a BOM,
+# which serde_json tolerates but isn't strictly valid for JSON consumers.
+# Using the .NET API with `UTF8Encoding($false)` gives us BOM-less output
+# on every PowerShell version.
+$json = $manifest | ConvertTo-Json -Depth 6
+[System.IO.File]::WriteAllText($outPath, $json, [System.Text.UTF8Encoding]::new($false))
 
 Write-Output "Wrote $outPath"
 Write-Output "  version    : $version"
