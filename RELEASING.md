@@ -43,51 +43,41 @@ pubkey before rotating.
 
 2. **Write the changelog** entry at the top of `CHANGELOG.md`.
 
-3. **Set the signing env vars** for this shell:
+3. **Build + sign + manifest in one command**:
 
    ```powershell
-   $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content "$env:USERPROFILE\.tauri\quartz.key" -Raw
-   # Tauri prompts for a password even when the key has none — set this
-   # to empty string to skip the prompt. If your key DOES have a password,
-   # paste it here instead.
-   $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+   .\scripts\build-release.ps1 -Notes "Short summary of this release"
    ```
 
-   On this machine both are already set persistently for the user, so
-   any new shell inherits them automatically and you can skip this step.
+   The script:
+   - Reads the signing key + password from your User-scope env vars
+     (which Windows doesn't always re-propagate to existing shells —
+     this is the foolproof path)
+   - Runs `npm run tauri build` to compile, bundle, and sign
+   - Runs `make-latest-json.ps1` to assemble the update manifest
 
-4. **Build + sign**:
-
-   ```powershell
-   npm run tauri build
-   ```
-
-   Successful output produces two files under
+   Successful output produces three coherent files under
    `src-tauri\target\release\bundle\nsis\`:
 
    | File | What it is |
    |---|---|
    | `Quartz_X.Y.Z_x64-setup.exe` | The installer end users download |
    | `Quartz_X.Y.Z_x64-setup.exe.sig` | Detached signature (binary integrity proof) |
+   | `latest.json` | Update manifest the running app fetches |
 
-5. **Generate the update manifest**. Tauri 2 doesn't auto-create
-   `latest.json` — we have a small script for it:
+   ⚠️ **Don't run plain `npm run tauri build` directly** — fresh
+   PowerShell windows on Windows often don't inherit User-scope env
+   vars, so the signing step will hang or fail. The wrapper above
+   sources the vars explicitly to avoid that trap.
 
-   ```powershell
-   .\scripts\make-latest-json.ps1 -Notes "Short summary of this release"
-   ```
-
-   That reads the version from `tauri.conf.json`, picks up the
-   freshly-built `.sig`, and writes `latest.json` next to the installer.
-
-6. **Tag the commit** locally:
+4. **Tag the commit** locally:
 
    ```powershell
    git tag -a vX.Y.Z -m "Quartz X.Y.Z"
    git push origin vX.Y.Z
    ```
 
-7. **Create a GitHub Release** for the tag, attaching all three artifacts:
+5. **Create a GitHub Release** for the tag, attaching all three artifacts:
 
    ```powershell
    gh release create vX.Y.Z `
@@ -102,7 +92,7 @@ pubkey before rotating.
    automatically resolves to the new release — no DNS change, no manual
    redirect to update.
 
-8. **Sanity check**: open `https://github.com/hernan9915/quartz/releases/latest/download/latest.json`
+6. **Sanity check**: open `https://github.com/hernan9915/quartz/releases/latest/download/latest.json`
    in a browser; should download the JSON. Open it; the version field
    should match what you just released.
 
