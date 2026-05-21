@@ -6,6 +6,16 @@ anyone else's library, there's no automated test suite, and I'm sure
 there are bugs waiting to be found by the people running it on real
 30k-track collections.
 
+> **Honest disclosure**: Quartz was vibe-coded with
+> [Claude](https://claude.com/) (Anthropic's AI). I drove the
+> architecture and product decisions; Claude did most of the
+> implementation under review. Every commit carries a
+> `Co-Authored-By: Claude` trailer so the trail is visible in `git log`.
+> If that changes your decision to install, totally fair — better you
+> know up front. See the
+> [README's "How Quartz was built" section](https://github.com/hernan9915/quartz#how-quartz-was-built)
+> for the full version.
+
 If you try it and something breaks (or just feels off), I'd love an
 issue with as much detail as you can give.
 

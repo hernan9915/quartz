@@ -140,6 +140,31 @@ Fonts: [Lora](https://fonts.google.com/specimen/Lora),
 [JetBrains Mono](https://www.jetbrains.com/lp/mono/).
 All under the SIL Open Font License.
 
+## How Quartz was built
+
+Honest disclosure: Quartz was vibe-coded with
+[Claude](https://claude.com/) (Anthropic's AI) over a handful of long
+sessions. I drove the product direction, design, architecture decisions,
+and review; Claude did most of the actual typing under iteration. Every
+commit carries a `Co-Authored-By: Claude` trailer so the credit trail is
+fully visible in `git log`.
+
+What that means for you, as a user:
+
+- The code is real software — it compiles, it plays your music, the
+  features work as described.
+- The architecture decisions (WASAPI exclusive vs shared, dB-scale
+  visualizer, single-pass EQ chain, dB compensation curves, delta scan,
+  etc.) are deliberate and reviewed.
+- I haven't independently rewritten every line — there's almost
+  certainly code in here that an experienced Rust/React engineer would
+  write differently. Bugs that AI-collaborated codebases tend to have
+  (subtle edge cases, dead branches, inconsistent error handling) will
+  show up over time.
+- If you'd rather not run software built this way for any reason — that's
+  legitimate, and the disclosure here is exactly so you can make that
+  call with full information.
+
 ## Contributing
 
 PRs welcome for bug fixes. For new features, please open an issue first so we
