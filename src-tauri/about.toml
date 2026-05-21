@@ -1,0 +1,46 @@
+# cargo-about config for generating THIRD_PARTY_LICENSES.html.
+#
+# Run from the src-tauri/ directory:
+#   cargo about generate about.hbs > ..\THIRD_PARTY_LICENSES.html
+#
+# Or via the wrapper script:
+#   .\scripts\make-licenses.ps1
+
+# Licenses we acknowledge as compatible with shipping Quartz under MIT.
+# All of these are either permissive (MIT-style) or weak copyleft
+# (MPL-2.0 — file-scoped, doesn't infect Quartz code).
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSD-3-Clause-Clear",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "0BSD",
+    "WTFPL",
+]
+
+# Skip the inevitable handful of crates that ship without a parseable
+# `license` field but ARE permissively licensed in their LICENSE file —
+# we add these case-by-case as cargo-about complains about them. Empty
+# at first; populate with `[clarify]` blocks when needed.
+
+# Don't pull in dev-only dependencies — those don't ship in the binary
+# and don't need attribution.
+ignore-dev-dependencies = true
+ignore-build-dependencies = false
+
+# Generate the manifest for every target we actually ship to, so crates
+# that only compile on Windows-MSVC are included with their licenses.
+targets = ["x86_64-pc-windows-msvc"]
+

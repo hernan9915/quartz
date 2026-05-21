@@ -1,0 +1,47 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Rust / Cargo build output (Tauri backend). target/ for any nested workspace.
+src-tauri/target/
+**/target/
+
+# Tauri build sub-products that land in src-tauri/gen at build time. The
+# committed files in src-tauri/gen/schemas/ are committed deliberately — only
+# the generated WiX/NSIS scratch dirs are ignored.
+src-tauri/WixTools/
+src-tauri/gen/android/
+src-tauri/gen/ios/
+
+# Signing keys — should never live in the repo. The actual keys live at
+# ~/.tauri/quartz.key on dev machines; this rule is a belt-and-braces guard
+# against an accidental copy.
+*.key
+quartz.key*
+.tauri/
+
+# Local environment overrides.
+.env
+.env.local
+.env.*.local

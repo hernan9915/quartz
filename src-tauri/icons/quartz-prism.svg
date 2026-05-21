@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <radialGradient id="bg-glow" cx="50%" cy="40%" r="70%">
+      <stop offset="0%" stop-color="#1c1a18"/>
+      <stop offset="100%" stop-color="#0a0a0c"/>
+    </radialGradient>
+    <radialGradient id="prism-glow" cx="50%" cy="42%" r="55%">
+      <stop offset="0%" stop-color="#c9a96e" stop-opacity="0.22"/>
+      <stop offset="55%" stop-color="#c9a96e" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#c9a96e" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accent-stroke" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#e8c890"/>
+      <stop offset="100%" stop-color="#b08c52"/>
+    </linearGradient>
+    <linearGradient id="inner-fill" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#c9a96e" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#c9a96e" stop-opacity="0.12"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background — rounded square, deep neutral with a faint warm glow up top. -->
+  <rect width="1024" height="1024" rx="180" ry="180" fill="url(#bg-glow)"/>
+  <rect width="1024" height="1024" rx="180" ry="180" fill="url(#prism-glow)"/>
+
+  <!-- Prism: vertical hexagon, centered. Mirrors the in-app LogoMark "prism". -->
+  <g transform="translate(512 512)">
+    <!-- Outer hexagon outline -->
+    <path d="M 0 -420 L 360 -210 L 360 210 L 0 420 L -360 210 L -360 -210 Z"
+          fill="none" stroke="url(#accent-stroke)" stroke-width="22" stroke-linejoin="round"/>
+
+    <!-- Internal facet lines (vertical spine + two horizontal girdles) -->
+    <path d="M 0 -420 L 0 420 M -360 -210 L 360 -210 M -360 210 L 360 210"
+          stroke="#c9a96e" stroke-opacity="0.35" stroke-width="12" stroke-linecap="round"/>
+
+    <!-- Central accent diamond — soft fill, slightly luminous -->
+    <path d="M 0 -420 L 180 0 L 0 420 L -180 0 Z"
+          fill="url(#inner-fill)"/>
+
+    <!-- Hairline edge highlights at the top vertex -->
+    <path d="M 0 -420 L 180 0 M 0 -420 L -180 0"
+          stroke="#f0d59a" stroke-opacity="0.55" stroke-width="6" stroke-linecap="round"/>
+  </g>
+</svg>

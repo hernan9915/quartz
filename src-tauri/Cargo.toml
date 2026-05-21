@@ -1,0 +1,74 @@
+[package]
+name = "quartz"
+version = "0.1.0"
+description = "A bit-perfect Windows music player for your local library"
+authors = ["Hernan"]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/hernan9915/quartz"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "quartz_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+# Self-update from GitHub Releases. `updater` checks an endpoint for a
+# newer signed binary; `process` provides the relaunch() call so we can
+# restart cleanly after install.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Audio
+wasapi = "0.14"
+windows = { version = "0.51", features = ["Win32_Foundation", "Win32_System_Threading"] }
+symphonia = { version = "0.5", features = ["flac", "wav", "pcm", "aiff", "ogg", "vorbis"] }
+rustfft = "6"
+crossbeam-channel = "0.5"
+log = "0.4"
+
+# Library
+rusqlite = { version = "0.31", features = ["bundled"] }
+lofty = "0.21"
+walkdir = "2"
+tokio = { version = "1", features = ["rt"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+ebur128 = "0.1"
+# Cover-art thumbnail generation. Restricted to the three formats we ever
+# see embedded (jpeg, png, webp) to keep compile time + binary size sane.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+# System Media Transport Controls (lock-screen tile, taskbar mini-controls,
+# hardware media keys, Bluetooth headphone buttons). souvlaki is a thin
+# cross-platform wrapper over SMTC on Windows; the Linux/macOS backends are
+# inert but available, so the same code paths compile everywhere.
+souvlaki = "0.7"
+
+# File system watcher for live library updates. notify-debouncer-mini
+# coalesces bursts of events (file-copy of an album generates dozens of
+# Modified events per second) into one callback per quiet window.
+notify = "6"
+notify-debouncer-mini = "0.4"
+
+# Release profile tuning. The audio engine and DB hot paths benefit
+# noticeably from cross-crate inlining (LTO) and a single codegen unit —
+# we measured 5–15 % on similar pipelines, and there's no runtime risk.
+# panic stays "unwind" so a panic in the audio thread doesn't kill the app.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+opt-level = 3
+

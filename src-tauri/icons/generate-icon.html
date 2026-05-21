@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Quartz icon generator</title>
+<style>
+  body {
+    background: #0a0a0c; color: #efe7d6;
+    font-family: -apple-system, Segoe UI, system-ui, sans-serif;
+    padding: 60px; margin: 0; text-align: center;
+  }
+  h1 { font-family: Georgia, serif; font-weight: 400; font-size: 28px; margin: 0 0 8px; }
+  p { color: #8a8478; font-size: 13px; max-width: 540px; margin: 12px auto; line-height: 1.7; }
+  code { font-family: ui-monospace, monospace; color: #c9a96e; background: #131316; padding: 2px 6px; border-radius: 3px; }
+  button {
+    background: #c9a96e; color: #0a0a0c; border: 0; padding: 14px 28px;
+    font-size: 13px; border-radius: 6px; cursor: pointer; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase; margin-top: 24px;
+  }
+  button:hover { background: #d8b87d; }
+  canvas {
+    background: transparent; box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+    margin-top: 36px; max-width: 280px; max-height: 280px; border-radius: 12px;
+  }
+</style>
+</head>
+<body>
+  <h1>Quartz icon generator</h1>
+  <p>Click the button to download <code>quartz-prism.png</code> at 1024×1024.</p>
+  <p>Then from a terminal in the project root:</p>
+  <p><code>cd src-tauri</code> &nbsp;→&nbsp; <code>npm run tauri icon icons/quartz-prism.png</code></p>
+  <p>That regenerates every icon variant (icon.ico, icon.png, all platform sizes). Restart the dev server and the new logo appears in the window + taskbar.</p>
+
+  <button onclick="download()">Download quartz-prism.png</button>
+  <br />
+  <canvas id="c" width="1024" height="1024"></canvas>
+
+<script>
+// SVG inlined so this file works when double-clicked (file://). The source-of-truth
+// SVG is still quartz-prism.svg next to this file; keep them in sync if you edit.
+const SVG_SOURCE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <radialGradient id="bg-glow" cx="50%" cy="40%" r="70%">
+      <stop offset="0%" stop-color="#1c1a18"/>
+      <stop offset="100%" stop-color="#0a0a0c"/>
+    </radialGradient>
+    <radialGradient id="prism-glow" cx="50%" cy="42%" r="55%">
+      <stop offset="0%" stop-color="#c9a96e" stop-opacity="0.22"/>
+      <stop offset="55%" stop-color="#c9a96e" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#c9a96e" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accent-stroke" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#e8c890"/>
+      <stop offset="100%" stop-color="#b08c52"/>
+    </linearGradient>
+    <linearGradient id="inner-fill" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#c9a96e" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#c9a96e" stop-opacity="0.12"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="180" ry="180" fill="url(#bg-glow)"/>
+  <rect width="1024" height="1024" rx="180" ry="180" fill="url(#prism-glow)"/>
+  <g transform="translate(512 512)">
+    <path d="M 0 -420 L 360 -210 L 360 210 L 0 420 L -360 210 L -360 -210 Z"
+          fill="none" stroke="url(#accent-stroke)" stroke-width="22" stroke-linejoin="round"/>
+    <path d="M 0 -420 L 0 420 M -360 -210 L 360 -210 M -360 210 L 360 210"
+          stroke="#c9a96e" stroke-opacity="0.35" stroke-width="12" stroke-linecap="round"/>
+    <path d="M 0 -420 L 180 0 L 0 420 L -180 0 Z"
+          fill="url(#inner-fill)"/>
+    <path d="M 0 -420 L 180 0 M 0 -420 L -180 0"
+          stroke="#f0d59a" stroke-opacity="0.55" stroke-width="6" stroke-linecap="round"/>
+  </g>
+</svg>`;
+
+(async () => {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const blob = new Blob([SVG_SOURCE], { type: "image/svg+xml" });
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.onload = () => ctx.drawImage(img, 0, 0, 1024, 1024);
+  img.onerror = () => {
+    ctx.fillStyle = "#c97a6e";
+    ctx.font = "24px sans-serif";
+    ctx.fillText("Couldn't render SVG", 30, 100);
+  };
+  img.src = url;
+})();
+
+function download() {
+  const canvas = document.getElementById("c");
+  canvas.toBlob((b) => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(b);
+    a.download = "quartz-prism.png";
+    a.click();
+  }, "image/png");
+}
+</script>
+</body>
+</html>
