@@ -11,13 +11,11 @@ playlists, lyrics, listening stats, and **zero telemetry**.
 <table>
 <tr>
 <td width="50%"><img src="docs/screenshots/library-artists.png" alt="Artists view" /></td>
-<td width="50%"><img src="docs/screenshots/settings.png" alt="Settings" /></td>
-</tr>
-<tr>
 <td width="50%"><img src="docs/screenshots/now-playing-fullscreen.png" alt="Full-screen player" /></td>
-<td width="50%"><img src="docs/screenshots/mini-player.png" alt="Mini player" /></td>
 </tr>
 </table>
+
+<p align="center"><img src="docs/screenshots/mini-player.png" alt="Mini player widget" width="320" /></p>
 
 ## Why another music player
 
