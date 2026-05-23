@@ -1,10 +1,10 @@
 import {
-  useState, useEffect, useRef, useMemo, useCallback, useDeferredValue,
+  useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, useDeferredValue,
   useSyncExternalStore, useTransition, memo, lazy, Suspense,
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { QUEUE } from "./data";
 import type { Album, QueueTrack, Device, AlbumStyle } from "./data";
@@ -154,6 +154,9 @@ interface LibraryAlbum {
   sample_rate: number | null;
   bits_per_sample: number | null;
   cover_path: string | null;
+  /// Vibrant accent extracted from cover_path, `#rrggbb`. Lazily computed
+  /// on first play. null = not extracted yet, fall back to chosen accent.
+  accent_color: string | null;
 }
 
 interface LibraryTrack {
@@ -577,6 +580,40 @@ const Cover = memo(function Cover({ album, size = 180 }: CoverProps) {
 
   return <div style={{ width: px, height: px, background: c0 }} />;
 });
+
+// Crossfade wrapper for <Cover>. When album.id changes, renders both the
+// previous and new cover stacked and fades between them over ~320 ms.
+// Used in the NowPlayingBar + full-screen player + mini player where a
+// snap-cut between albums feels jarring; static contexts (album grid)
+// continue using <Cover> directly. The two-image stack is mounted only
+// during the transition — once the fade finishes, the previous img is
+// dropped from the tree to keep idle render cost identical to plain Cover.
+function CrossfadeCover({ album, size = 60 }: CoverProps) {
+  const [current, setCurrent] = useState<Album>(album);
+  const [prev, setPrev] = useState<Album | null>(null);
+  useEffect(() => {
+    if (album.id !== current.id) {
+      setPrev(current);
+      setCurrent(album);
+    }
+  }, [album, current]);
+  return (
+    <div style={{ position: "relative", width: size, height: size }}>
+      {prev && (
+        <div
+          className="q-cover-fadeout"
+          style={{ position: "absolute", inset: 0 }}
+          onAnimationEnd={() => setPrev(null)}
+        >
+          <Cover album={prev} size={size} />
+        </div>
+      )}
+      <div className="q-cover-fadein" key={current.id}>
+        <Cover album={current} size={size} />
+      </div>
+    </div>
+  );
+}
 
 // ── Logo marks ──────────────────────────────────────────────────────
 type LogoKind = "prism" | "cluster" | "facet" | "monogram" | "wave" | "tuning";
@@ -1557,9 +1594,15 @@ interface TrackListProps {
   // Right-click handler — opens the App's context menu at the click point.
   // Optional so callers that don't want the menu can simply omit it.
   onContextMenu?: (track: LibraryTrack, x: number, y: number) => void;
+  // Click handlers for the artist/album cells. When provided, those cells
+  // become clickable and navigate to the respective detail view instead
+  // of falling through to the row's onPlay. Optional — older callers that
+  // don't pass them keep the row-only-play behavior.
+  onOpenArtist?: (name: string) => void;
+  onOpenAlbum?: (albumId: number) => void;
 }
 
-const TrackList = memo(function TrackList({ tracks, albumMap, currentTrackPath, playing, onPlay, onContextMenu }: TrackListProps) {
+const TrackList = memo(function TrackList({ tracks, albumMap, currentTrackPath, playing, onPlay, onContextMenu, onOpenArtist, onOpenAlbum }: TrackListProps) {
   const ROW = 40;
   const [scrollTop, setScrollTop] = useState(0);
   const [height, setHeight] = useState(600);
@@ -1735,15 +1778,46 @@ const TrackList = memo(function TrackList({ tracks, albumMap, currentTrackPath, 
                 color: isCurrent ? "var(--accent)" : "var(--text)",
                 overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
               }}>{t.title}</span>
-              <span style={{
-                fontSize: 12, color: "var(--text-dim)",
-                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-              }}>{t.artist}</span>
-              <span style={{
-                fontSize: 12, color: "var(--text-faint)",
-                fontFamily: "var(--serif)", fontStyle: "italic",
-                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-              }}>{albumTitle}</span>
+              {/* Artist cell — clickable when onOpenArtist is provided.
+                  stopPropagation so the row's onClick doesn't fire (which
+                  would start playing the track on what the user expects
+                  to be a navigation click). */}
+              {onOpenArtist ? (
+                <span
+                  className="q-row-link"
+                  onClick={(e) => { e.stopPropagation(); onOpenArtist(t.artist); }}
+                  style={{
+                    fontSize: 12, color: "var(--text-dim)",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    cursor: "pointer",
+                  }}
+                  title={`View ${t.artist}`}
+                >{t.artist}</span>
+              ) : (
+                <span style={{
+                  fontSize: 12, color: "var(--text-dim)",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}>{t.artist}</span>
+              )}
+              {onOpenAlbum && albumTitle ? (
+                <span
+                  className="q-row-link"
+                  onClick={(e) => { e.stopPropagation(); onOpenAlbum(t.album_id); }}
+                  style={{
+                    fontSize: 12, color: "var(--text-faint)",
+                    fontFamily: "var(--serif)", fontStyle: "italic",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    cursor: "pointer",
+                  }}
+                  title={`View ${albumTitle}`}
+                >{albumTitle}</span>
+              ) : (
+                <span style={{
+                  fontSize: 12, color: "var(--text-faint)",
+                  fontFamily: "var(--serif)", fontStyle: "italic",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}>{albumTitle}</span>
+              )}
               <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)", textAlign: "right" }}>
                 {durLabel}
               </span>
@@ -3120,19 +3194,23 @@ function SpectrumLive({ bars = 22, height = 22 }: { bars?: number; height?: numb
     })),
   );
   const hasRealBinsRef = useRef(false);
+  // Cached accent values + a per-frame read of the CSS vars so the canvas
+  // tracks any change to --accent-runtime (dynamic-from-cover-art accent)
+  // OR --accent (user's chosen accent) without remounting. The lookup is
+  // one getComputedStyle per RAF — measured negligible vs the canvas draw.
   const accentRef = useRef<{ accent: string; accentDim: string }>({
     accent: "#c9a96e", accentDim: "#8a754d",
   });
-
-  // Re-read CSS-var accents on mount so the canvas matches the theme.
-  // We don't subscribe to theme changes (rare event); next reflow refresh.
-  useEffect(() => {
+  const readAccent = () => {
     const cs = getComputedStyle(document.documentElement);
-    const a = cs.getPropertyValue("--accent").trim();
-    const ad = cs.getPropertyValue("--accent-dim").trim();
+    // Prefer --accent-runtime (dynamic-from-art); fall back to --accent.
+    const a = (cs.getPropertyValue("--accent-runtime").trim() || cs.getPropertyValue("--accent").trim());
+    const ad = (cs.getPropertyValue("--accent-runtime-dim").trim() || cs.getPropertyValue("--accent-dim").trim());
     if (a) accentRef.current.accent = a;
     if (ad) accentRef.current.accentDim = ad;
-  }, []);
+  };
+  // Initial read on mount so the first paint matches the theme.
+  useEffect(() => { readAccent(); }, []);
 
   // Resize backing store on DPR / size change. Done in effect so the canvas
   // ref is mounted; the `style.width/height` keeps layout independent of DPR.
@@ -3208,11 +3286,17 @@ function SpectrumLive({ bars = 22, height = 22 }: { bars?: number; height?: numb
 
     let raf = 0;
     const start = performance.now();
+    // Re-read CSS-var accents periodically so theme + dynamic-accent changes
+    // propagate without remounting. Every ~16 frames (≈4 Hz at 60fps) is
+    // plenty given color changes take 300ms+ to perceive.
+    let accentTick = 0;
     const draw = () => {
       raf = requestAnimationFrame(draw);
       const w = c.width;
       const h = c.height;
       ctx.clearRect(0, 0, w, h);
+
+      if ((accentTick++ & 15) === 0) readAccent();
 
       const arr = binsRef.current;
       const hasReal = hasRealBinsRef.current;
@@ -3614,7 +3698,7 @@ function NowPlayingBar({
       {/* Left: art + meta */}
       <div className="q-npb-left">
         <div onClick={onOpenFullscreen} title="Fullscreen (F)" className="q-npb-art">
-          <Cover album={currentAlbum} size={60} />
+          <CrossfadeCover album={currentAlbum} size={60} />
         </div>
         <div className="q-npb-meta">
           <div className="q-npb-title">
@@ -3960,6 +4044,13 @@ interface FullscreenPlayerProps {
   onRepeatCycle: () => void;
   onOpenMiniPlayer: () => void;
   accentName: string;
+  /// v0.2.0 dynamic accent: the extracted vibrant color from the currently
+  /// playing album's cover, or null if extraction hasn't run / no cover.
+  /// FullscreenPlayer always wants a dark-friendly accent (backdrop is
+  /// near-black), and the Rust extractor already clamps lightness into a
+  /// good band, so we can use this raw when present.
+  dynamicAccentColor: string | null;
+  dynamicAccent: boolean;
   scrubStyle: ScrubStyle;
   waveformPeaks: number[] | null;
   /// Currently-playing track id; null = nothing loaded. When null the
@@ -3977,6 +4068,7 @@ function FullscreenPlayer({
   liveTrack, onPrev, onNext, volume, onVolumeChange,
   shuffle, onShuffleToggle, repeatMode, onRepeatCycle,
   onOpenMiniPlayer, accentName,
+  dynamicAccentColor, dynamicAccent,
   scrubStyle, waveformPeaks,
   currentTrackId, isFavorite, onToggleFavorite,
 }: FullscreenPlayerProps) {
@@ -4010,8 +4102,14 @@ function FullscreenPlayer({
   const liveFmt = liveTrack ? (liveBit === 1 ? "DSD" : "FLAC") : currentAlbum.format;
   const trackTitle = current.title.split(" — ")[1] ?? current.title;
 
-  // Always use the dark accent variant — the blurred bg is always near-black.
-  const fsAccent = getAccentHex(accentName, "dark");
+  // Pick the accent: dynamic-from-cover wins when enabled and we've got
+  // an extracted color, otherwise fall back to the user's chosen accent's
+  // dark variant. The Rust extractor clamps lightness into [0.42, 0.68]
+  // which reads well against the blurred-dark backdrop, so no further
+  // adjustment is needed here.
+  const fsAccent = (dynamicAccent && dynamicAccentColor)
+    ? dynamicAccentColor
+    : getAccentHex(accentName, "dark");
   const fsAccentDim = mix(fsAccent, "#000000", 0.35);
 
   return (
@@ -4019,6 +4117,11 @@ function FullscreenPlayer({
       style={{
         position: "fixed", inset: 0, zIndex: 9999,
         display: "flex", flexDirection: "column", overflow: "hidden",
+        // Solid background so the overlay is always fully opaque even before
+        // the blurred art backdrop has loaded (or if artUrl 404s / is null).
+        // Without this, the 38%-opacity vignette is the only thing blocking
+        // the underlying app — and 62% of it bleeds through.
+        background: "#0a0a0c",
         // Local CSS-var scope so SpectrumLive + any other child using var(--accent)
         // always sees the dark-mode accent, regardless of the active app theme.
         "--accent": fsAccent,
@@ -4026,15 +4129,14 @@ function FullscreenPlayer({
       } as React.CSSProperties}
     >
       {/* ── Blurred art backdrop (always dark) ── */}
-      {artUrl ? (
+      {artUrl && (
         <div style={{
           position: "absolute", inset: "-10%",
           backgroundImage: `url("${artUrl}")`,
           backgroundSize: "cover", backgroundPosition: "center",
+          backgroundColor: "#0a0a0c",
           filter: "blur(60px) brightness(0.22) saturate(1.5)",
         }} />
-      ) : (
-        <div style={{ position: "absolute", inset: 0, background: "#0a0a0c" }} />
       )}
       {/* Extra vignette for contrast */}
       <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.38)" }} />
@@ -4585,6 +4687,10 @@ export default function App() {
   const [artistView, setArtistView] = usePersistedState<"grid" | "list">("artistView", "grid");
   const [theme, setTheme] = usePersistedState<Theme>("theme", "dark");
   const [accentName, setAccentName] = usePersistedState<string>("accent", "Brass");
+  // v0.2.0: dynamic per-album accent extracted from cover art. When on, the
+  // UI tint follows whatever's playing; when off, it sticks to the
+  // user-chosen `accentName`. Defaults on because it's the headline feature.
+  const [dynamicAccent, setDynamicAccent] = usePersistedState<boolean>("dynamicAccent", true);
   const [logo] = useState<LogoKind>("prism");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
@@ -4875,15 +4981,65 @@ export default function App() {
   useEffect(() => { queueRef.current = queue; }, [queue]);
   useEffect(() => { queueIndexRef.current = queueIndex; }, [queueIndex]);
 
+  // Compute and apply the active accent. Depends on:
+  //   - theme: each theme has its own variant of the named accents
+  //   - accentName: user's chosen palette in Settings (fallback)
+  //   - dynamicAccent + currentLibAlbumId: when on, override accent with the
+  //     extracted vibrant color from the currently-playing album's cover
+  //   - libAlbums: source of truth for the extracted accent_color
+  // Track lookup is by id so re-renders are O(log n) on a 30k-album library.
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
-    const accent = getAccentHex(accentName, theme);
-    const accentDim = mix(accent, "#000000", 0.35);
-    const accentSoft = hexToRgba(accent, 0.12);
-    document.documentElement.style.setProperty("--accent", accent);
+    const userAccent = getAccentHex(accentName, theme);
+    let active = userAccent;
+    if (dynamicAccent && currentLibAlbumId != null) {
+      const album = libAlbums.find((a) => a.id === currentLibAlbumId);
+      const extracted = album?.accent_color;
+      if (extracted) {
+        // Light/sepia themes need the accent darkened a touch so it
+        // reads as a tint on a light background. Dark/rose themes use
+        // it as-is (the Rust extractor already clamps lightness into
+        // a UI-friendly band).
+        active = (theme === "light" || theme === "sepia")
+          ? mix(extracted, "#000000", 0.28)
+          : extracted;
+      }
+    }
+    const accentDim = mix(active, "#000000", 0.35);
+    const accentSoft = hexToRgba(active, 0.12);
+    document.documentElement.style.setProperty("--accent", active);
     document.documentElement.style.setProperty("--accent-dim", accentDim);
     document.documentElement.style.setProperty("--accent-soft", accentSoft);
-  }, [theme, accentName]);
+    // Broadcast to the mini-player window (separate webview, doesn't share
+    // documentElement style). localStorage is the initial-paint channel:
+    // it's set synchronously here AND read synchronously when the mini
+    // player mounts, so there's no flash of the default gold on launch.
+    // The Tauri event is the runtime-update channel: triggers an instant
+    // swap on every track change without each window doing its own IPC.
+    try { localStorage.setItem("quartz:activeAccent", active); } catch {}
+    void emit("accent-changed", active).catch(() => {});
+  }, [theme, accentName, dynamicAccent, currentLibAlbumId, libAlbums]);
+
+  // Lazy extraction trigger: when a track starts playing and the album's
+  // accent_color is still NULL, ask Rust to extract + cache it. The fetch
+  // resolves with the hex on success; we patch it into libAlbums so the
+  // accent effect above picks it up on its next run. Skips if dynamicAccent
+  // is off (no point burning CPU on extractions the user can't see).
+  useEffect(() => {
+    if (!dynamicAccent || currentLibAlbumId == null) return;
+    const album = libAlbums.find((a) => a.id === currentLibAlbumId);
+    if (!album || album.accent_color) return; // already cached
+    let cancelled = false;
+    invoke<string | null>("get_album_accent_color", { albumId: currentLibAlbumId })
+      .then((hex) => {
+        if (cancelled || !hex) return;
+        setLibAlbums((xs) => xs.map((a) =>
+          a.id === currentLibAlbumId ? { ...a, accent_color: hex } : a
+        ));
+      })
+      .catch((err) => console.error("[quartz] get_album_accent_color failed:", err));
+    return () => { cancelled = true; };
+  }, [dynamicAccent, currentLibAlbumId, libAlbums]);
 
   const refreshAlbums = () => {
     invoke<LibraryAlbum[]>("list_albums")
@@ -5017,13 +5173,53 @@ export default function App() {
     // spectrum-bins is now subscribed to directly by <SpectrumLive>.
     const unlistenError = listen<string>("playback-error", (e) => {
       console.error("[quartz] PLAYBACK ERROR:", e.payload);
+      // Auto-skip past the failing track. Rust emits playback-error and
+      // breaks the audio session WITHOUT firing track-ended, which means
+      // the queue would dead-end here without manual user action. Common
+      // causes: file deleted after scan, corrupt file, unsupported sample
+      // rate, device rejected exclusive mode. Re-using the same advance
+      // logic as track-ended keeps the queue moving.
+      const q = queueRef.current;
+      const curIdx = queueIndexRef.current;
+      if (q.length === 0) return;
+      // Don't infinite-loop on repeat-one — that's how the user gets stuck.
+      const effectiveRepeat = repeatModeRef.current === "one" ? "off" : repeatModeRef.current;
+      let nextIdx: number | null;
+      if (shuffleRef.current && q.length > 1) {
+        let r: number;
+        do { r = Math.floor(Math.random() * q.length); } while (r === curIdx);
+        nextIdx = r;
+      } else {
+        const i = curIdx + 1;
+        if (i < q.length) nextIdx = i;
+        else if (effectiveRepeat === "all") nextIdx = 0;
+        else nextIdx = null;
+      }
+      if (nextIdx !== null) {
+        const idx = nextIdx;
+        queueIndexRef.current = idx;
+        setQueueIndex(idx);
+        // If the new track is in a different album (e.g. Tracks tab,
+        // smart playlist, or any mixed-album queue), update the currently-
+        // shown album state. Without this, NowPlayingBar / FullscreenPlayer /
+        // mini player all keep showing the OLD album's artist + title.
+        setCurrentLibAlbumId(q[idx].album_id);
+        pushRecent(q[idx].album_id);
+        invoke("play_file", { path: q[idx].path }).catch(console.error);
+        invoke("log_play", { trackId: q[idx].id }).catch(() => {});
+        const nextNextIdx = computeNextIndex(idx, q.length);
+        pendingNextIdxRef.current = nextNextIdx;
+        if (nextNextIdx !== null) {
+          invoke("queue_next_track", { path: q[nextNextIdx].path }).catch(console.error);
+        }
+      }
     });
     const unlistenEnded = listen("track-ended", () => {
       const q = queueRef.current;
+      const curIdx = queueIndexRef.current;
       if (q.length === 0) return;
       if (repeatModeRef.current === "one") {
-        const i = queueIndexRef.current;
-        invoke("play_file", { path: q[i].path }).catch(console.error);
+        invoke("play_file", { path: q[curIdx].path }).catch(console.error);
         return;
       }
       let nextIdx: number | null;
@@ -5031,18 +5227,35 @@ export default function App() {
         let r: number;
         do {
           r = Math.floor(Math.random() * q.length);
-        } while (r === queueIndexRef.current);
+        } while (r === curIdx);
         nextIdx = r;
       } else {
-        const i = queueIndexRef.current + 1;
+        const i = curIdx + 1;
         if (i < q.length) nextIdx = i;
         else if (repeatModeRef.current === "all") nextIdx = 0;
         else nextIdx = null;
       }
       if (nextIdx !== null) {
-        invoke("play_file", { path: q[nextIdx].path })
-          .then(() => setQueueIndex(nextIdx as number))
-          .catch(console.error);
+        // Update queueIndex + ref synchronously BEFORE invoking play_file.
+        // If we waited for the invoke promise to resolve, the next track-ended
+        // (which can fire seconds later if it's a short track) would read a
+        // stale queueIndexRef and either replay the same track or fail to
+        // advance. Also pre-queue the track-after-that for gapless.
+        const idx = nextIdx;
+        queueIndexRef.current = idx;
+        setQueueIndex(idx);
+        // Also update the currently-shown album so the UI (NPB, FullscreenPlayer,
+        // mini player) reflects the new album when auto-advance crosses an
+        // album boundary (Tracks tab, smart playlists, Favorites, mixed queues).
+        setCurrentLibAlbumId(q[idx].album_id);
+        pushRecent(q[idx].album_id);
+        invoke("play_file", { path: q[idx].path }).catch(console.error);
+        invoke("log_play", { trackId: q[idx].id }).catch(() => {});
+        const nextNextIdx = computeNextIndex(idx, q.length);
+        pendingNextIdxRef.current = nextNextIdx;
+        if (nextNextIdx !== null) {
+          invoke("queue_next_track", { path: q[nextNextIdx].path }).catch(console.error);
+        }
       }
     });
     // Gapless: engine crossed a track boundary seamlessly — advance the queue
@@ -5052,6 +5265,9 @@ export default function App() {
       const newIdx = pendingNextIdxRef.current;
       if (newIdx === null || q.length === 0) return;
       setQueueIndex(newIdx);
+      // Cross-album gapless transitions need the album state to follow too.
+      setCurrentLibAlbumId(q[newIdx].album_id);
+      pushRecent(q[newIdx].album_id);
       invoke("log_play", { trackId: q[newIdx].id }).catch(() => {});
       // Queue the track after the one we just moved to.
       const nextNextIdx = computeNextIndex(newIdx, q.length);
@@ -5420,6 +5636,11 @@ export default function App() {
     try {
       await invoke("play_file", { path: tracks[index].path });
       setQueueIndex(index);
+      // Update displayed album when manual prev/next or queue clicks cross
+      // an album boundary. Without this, NPB / FullscreenPlayer / mini player
+      // keep showing the OLD album.
+      setCurrentLibAlbumId(tracks[index].album_id);
+      pushRecent(tracks[index].album_id);
       // Pre-queue next track for gapless playback.
       const nextIdx = computeNextIndex(index, tracks.length);
       pendingNextIdxRef.current = nextIdx;
@@ -5429,7 +5650,7 @@ export default function App() {
     } catch (err) {
       console.error("[quartz] play_file failed:", err);
     }
-  }, [setQueueIndex]); // computeNextIndex reads stable refs — no dep needed
+  }, [setQueueIndex, setCurrentLibAlbumId, pushRecent]); // computeNextIndex reads stable refs — no dep needed
 
   const openArtist = useCallback(async (name: string) => {
     setDetailArtistName(name);
@@ -5447,6 +5668,13 @@ export default function App() {
   };
 
   const openAlbum = useCallback(async (libId: number) => {
+    // Clear other detail views — the conditional ladder in the main render
+    // checks artist + playlist before album, so leaving either set would
+    // keep the wrong panel visible (this was the artist→album navigation bug).
+    setDetailArtistName(null);
+    setArtistDetailAlbums([]);
+    setDetailPlaylistId(null);
+    setDetailPlaylistTracks([]);
     setDetailAlbumId(libId);
     try {
       const tracks = await invoke<LibraryTrack[]>("list_tracks", { albumId: libId });
@@ -5467,6 +5695,12 @@ export default function App() {
     pushRecent(t.album_id);
     invoke("play_file", { path: t.path }).catch(console.error);
     invoke("log_play", { trackId: t.id }).catch(() => {});
+    // Pre-queue next for gapless auto-advance.
+    const nextIdx = index + 1 < tracks.length ? index + 1 : null;
+    pendingNextIdxRef.current = nextIdx;
+    if (nextIdx !== null) {
+      invoke("queue_next_track", { path: tracks[nextIdx].path }).catch(console.error);
+    }
   }, [setCurrentLibAlbumId, setQueue, setQueueIndex, pushRecent]);
 
   // Play an album without opening the detail view (used by hover-play in the grid).
@@ -5480,6 +5714,12 @@ export default function App() {
       pushRecent(libId);
       await invoke("play_file", { path: tracks[0].path });
       invoke("log_play", { trackId: tracks[0].id }).catch(() => {});
+      // Pre-queue next for gapless auto-advance.
+      const nextIdx = tracks.length > 1 ? 1 : null;
+      pendingNextIdxRef.current = nextIdx;
+      if (nextIdx !== null) {
+        invoke("queue_next_track", { path: tracks[nextIdx].path }).catch(console.error);
+      }
     } catch (err) {
       console.error("[quartz] quickPlayAlbum failed:", err);
     }
@@ -6037,6 +6277,22 @@ export default function App() {
     setShowAiDialog(true);
   }, []);
 
+  // Animation trigger key for screen transitions. Whenever the user
+  // navigates (sidebar item, opens a detail view, settings, etc.) this
+  // string changes, the content panel's div remounts with key=routeKey,
+  // and its CSS class .q-screen fires the fade+rise enter animation.
+  // Tradeoff: virtualized grids reset scroll position on remount. Worth
+  // it for the perceived polish.
+  const routeKey = settingsOpen
+    ? "settings"
+    : detailPlaylistId !== null
+      ? `playlist-${detailPlaylistId}`
+      : detailArtistName !== null
+        ? `artist-${detailArtistName}`
+        : detailAlbumId !== null
+          ? `album-${detailAlbumId}`
+          : `section-${section}`;
+
   return (
     <div className="app-shell" data-scrub={scrubStyle} style={{ position: "relative" }}>
       <TitleBar
@@ -6067,13 +6323,15 @@ export default function App() {
           onAiPlaylist={sidebarAiPlaylist}
           hasAiKey={!!anthropicApiKey.trim()}
         />
-        <div style={{ display: "grid", gridTemplateRows: settingsOpen || detailAlbumId !== null || detailArtistName !== null || detailPlaylistId !== null ? "1fr" : "auto 1fr", overflow: "hidden", background: "var(--bg)", position: "relative" }}>
+        <div key={routeKey} className="q-screen" style={{ display: "grid", gridTemplateRows: settingsOpen || detailAlbumId !== null || detailArtistName !== null || detailPlaylistId !== null ? "1fr" : "auto 1fr", overflow: "hidden", background: "var(--bg)", position: "relative" }}>
           {settingsOpen ? (
             <SettingsPage
               theme={theme}
               setTheme={setTheme}
               accentName={accentName}
               setAccentName={setAccentName}
+              dynamicAccent={dynamicAccent}
+              onDynamicAccentChange={setDynamicAccent}
               devices={devices}
               selectedDeviceId={selectedDeviceId}
               onSelectDevice={onSelectDevice}
@@ -6211,6 +6469,8 @@ export default function App() {
                   playing={pbMeta.playing}
                   onPlay={playTrackFromList}
                   onContextMenu={openTrackContextMenu}
+                  onOpenArtist={openArtist}
+                  onOpenAlbum={openAlbum}
                 />
               )}
             </div>
@@ -6246,6 +6506,8 @@ export default function App() {
                   playing={pbMeta.playing}
                   onPlay={playTrackFromList}
                   onContextMenu={openTrackContextMenu}
+                  onOpenArtist={openArtist}
+                  onOpenAlbum={openAlbum}
                 />
               )}
             </div>
@@ -6288,6 +6550,8 @@ export default function App() {
                   playing={pbMeta.playing}
                   onPlay={playTrackFromList}
                   onContextMenu={openTrackContextMenu}
+                  onOpenArtist={openArtist}
+                  onOpenAlbum={openAlbum}
                 />
               )}
             </div>
@@ -6394,6 +6658,12 @@ export default function App() {
         onRepeatCycle={cycleRepeat}
         onOpenMiniPlayer={openMiniPlayer}
         accentName={accentName}
+        dynamicAccent={dynamicAccent}
+        dynamicAccentColor={
+          currentLibAlbumId != null
+            ? (libAlbums.find((a) => a.id === currentLibAlbumId)?.accent_color ?? null)
+            : null
+        }
         scrubStyle={scrubStyle}
         waveformPeaks={currentWaveform}
         currentTrackId={currentTrackId ?? null}
@@ -6843,6 +7113,8 @@ interface SettingsPageProps {
   setTheme: (t: Theme) => void;
   accentName: string;
   setAccentName: (n: string) => void;
+  dynamicAccent: boolean;
+  onDynamicAccentChange: (v: boolean) => void;
   devices: Device[];
   selectedDeviceId: string | null;
   onSelectDevice: (id: string) => void;
@@ -6890,6 +7162,7 @@ interface SettingsPageProps {
 
 function SettingsPage({
   theme, setTheme, accentName, setAccentName,
+  dynamicAccent, onDynamicAccentChange,
   devices, selectedDeviceId, onSelectDevice,
   trackedFolders, onAddFolder, onRemoveFolder, onRescanAll, onWipeLibrary,
   onFetchArtistPhotos, onRefetchArtistPhotos,
@@ -6983,6 +7256,37 @@ function SettingsPage({
                 />
               );
             })}
+          </div>
+        </SettingRow>
+
+        <SettingRow label="Match accent to cover art">
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1 }}>
+            <div style={{ display: "flex", gap: 8 }}>
+              {([
+                { v: true,  label: "On"  },
+                { v: false, label: "Off" },
+              ]).map((opt) => (
+                <button
+                  key={String(opt.v)}
+                  onClick={() => onDynamicAccentChange(opt.v)}
+                  style={{
+                    flex: 1, padding: "10px 0",
+                    background: opt.v === dynamicAccent ? "var(--accent-soft)" : "transparent",
+                    border: opt.v === dynamicAccent ? "1px solid var(--accent)" : "1px solid var(--line-strong)",
+                    color: opt.v === dynamicAccent ? "var(--accent)" : "var(--text-dim)",
+                    fontSize: 11, letterSpacing: "0.14em",
+                    textTransform: "uppercase", fontFamily: "var(--sans)",
+                    cursor: "pointer", borderRadius: 3,
+                  }}
+                >{opt.label}</button>
+              ))}
+            </div>
+            <div style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.5 }}>
+              Tints the play button, scrub fill, and spectrum bars with the
+              dominant color of the currently-playing album's cover.
+              Falls back to the accent above when there's no cover or the
+              cover is grayscale.
+            </div>
           </div>
         </SettingRow>
 
@@ -8462,6 +8766,35 @@ export function MiniPlayerApp() {
   const libTrack = pbState.track ? trackMap[pbState.track.path] : null;
   const album = libTrack ? albumMap[libTrack.album_id] : null;
   const artUrl = album?.cover_path ? fileSrc(album.cover_path) : null;
+
+  // Dynamic accent for the mini player. The mini player is a separate
+  // Tauri window — the main App's setProperty on documentElement doesn't
+  // reach this window, and doing a per-track-change IPC roundtrip here
+  // showed up as a visible flash of the default gold before the new color
+  // arrived.
+  //
+  // Solution: the main App broadcasts the active accent on every change
+  // via (1) localStorage (synchronous, used for initial paint when this
+  // window mounts) and (2) a Tauri "accent-changed" event (used for
+  // runtime updates while the mini player is open). This eliminates the
+  // gold flash entirely — by the time the first paint runs, --accent is
+  // already set, and subsequent track changes update it via the event
+  // before the cover art crossfade animation even kicks in.
+  useLayoutEffect(() => {
+    const apply = (hex: string) => {
+      document.documentElement.style.setProperty("--accent", hex);
+      document.documentElement.style.setProperty("--accent-dim", mix(hex, "#000000", 0.35));
+      document.documentElement.style.setProperty("--accent-soft", hexToRgba(hex, 0.12));
+    };
+    // Initial paint: read whatever the main App last broadcast.
+    try {
+      const stored = localStorage.getItem("quartz:activeAccent");
+      if (stored) apply(stored);
+    } catch {}
+    // Runtime updates: re-paint on every broadcast.
+    const u = listen<string>("accent-changed", (e) => apply(e.payload));
+    return () => { u.then((f) => f()); };
+  }, []);
   const trackTitle = libTrack?.title
     ?? (pbState.track?.path ? pbState.track.path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? "—" : "—");
   const artist = libTrack?.artist ?? album?.artist ?? "";

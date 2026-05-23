@@ -258,6 +258,47 @@ fn list_albums_by_artist(artist: String, state: State<AppState>) -> Result<Vec<L
     state.library.list_albums_by_artist(&artist)
 }
 
+/// Look up (or compute + cache) the vibrant accent color for an album.
+///
+/// Behavior:
+///   - If `albums.accent_color` is already populated, return it immediately
+///     (cheap DB read).
+///   - Otherwise look up the album's cover_path. If there's no cover, return
+///     `None` — frontend falls back to the user's chosen accent.
+///   - If there's a cover, run extraction on a blocking thread (image decode
+///     + downscale + bucket pass; typically 5-15 ms on a modern machine).
+///     Persist the result to the DB so subsequent plays hit the cache.
+///
+/// Returns `Option<String>` — `None` is a normal outcome (no cover, mono
+/// art, or extraction filtered everything out), not an error.
+#[tauri::command]
+async fn get_album_accent_color(
+    album_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    // Fast path: already cached.
+    if let Ok(Some(hex)) = state.library.get_album_accent(album_id) {
+        return Ok(Some(hex));
+    }
+    // No cached value — need to extract. First grab the cover path.
+    let cover = state.library.get_album_cover_path(album_id)?;
+    let cover_path = match cover {
+        Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+        _ => return Ok(None),
+    };
+    let library = state.library.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let accent = library::extract_accent(&cover_path);
+        if let Some(ref hex) = accent {
+            let _ = library.set_album_accent(album_id, Some(hex));
+        }
+        accent
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
 #[tauri::command]
 async fn list_all_tracks(state: State<'_, AppState>) -> Result<Vec<LibraryTrack>, String> {
     // 30k+ track libraries take ~hundreds of ms to read+serialize — push it
@@ -1434,6 +1475,8 @@ pub fn run() {
             get_track_lyrics,
             // Phase 25: listening stats
             get_listening_stats,
+            // v0.2.0: dynamic accent color extracted from cover art
+            get_album_accent_color,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

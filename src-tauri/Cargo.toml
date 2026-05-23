@@ -1,6 +1,6 @@
 [package]
 name = "quartz"
-version = "0.1.0"
+version = "0.2.0"
 description = "A bit-perfect Windows music player for your local library"
 authors = ["Hernan"]
 edition = "2021"
@@ -70,5 +70,15 @@ notify-debouncer-mini = "0.4"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+opt-level = 3
+
+# Dev profile: keep OUR code at opt-level=0 (fast rebuilds, useful debugger
+# info), but compile every dependency at opt-level=3. Symphonia decoding,
+# rustfft, ebur128, and the image crate all run on hot audio/library paths
+# and are unusably slow at -O0 — bad enough to cause WASAPI buffer underruns
+# in `tauri dev` even on a fast machine. This change costs a one-time
+# longer first build (~2-3 min extra) but eliminates dev-mode audio glitches
+# and makes library scans actually finish in a reasonable time.
+[profile.dev.package."*"]
 opt-level = 3
 

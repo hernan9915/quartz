@@ -1,4 +1,33 @@
 /* ── Design tokens ─────────────────────────────────────────────── */
+
+/* v0.2.0: register --accent and friends as typed color properties so the
+   browser can natively interpolate them on change. Without these @property
+   declarations, CSS variable changes are STEP-FUNCTIONS (instant), and
+   only properties using them transition. The canvas spectrum visualiser
+   reads --accent via getComputedStyle every ~16 frames — which would
+   snap to the new color instead of fading. With @property the variable
+   itself interpolates, and the canvas sees the in-flight value on each
+   read. Modern Chromium (Tauri's WebView) supports this; on a browser
+   that doesn't, the declarations are ignored and behavior degrades to
+   instant variable updates with element-level transitions. */
+@property --accent {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #c9a96e;
+}
+@property --accent-dim {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #8a754d;
+}
+
+/* Drive the accent variable transition from the root so EVERY descendant
+   that uses var(--accent) — direct or transitive — fades smoothly when
+   the value updates (track change, theme change, accent-name change). */
+:root {
+  transition: --accent 420ms ease, --accent-dim 420ms ease;
+}
+
 :root {
   --bg: #0a0a0c;
   --bg-elev: #101013;
@@ -366,6 +395,35 @@ textarea:focus-visible,
   width: 2.5px;
   border-radius: 0.5px;
   background: linear-gradient(to top, var(--accent), var(--accent) 60%, var(--accent-dim));
+  /* Gradient transitions only when both color stops are simple variables —
+     happens to be true here, so the dynamic-accent shift on track change
+     fades the SpectrumMini cleanly. */
+  transition: background 420ms ease;
+}
+
+/* v0.2.0 dynamic accent transitions. When --accent updates on track change
+   (via the dynamic-from-cover-art feature), these selectors smoothly
+   interpolate their accent-driven color/border/glow instead of snapping.
+   Scoped to elements that actually read --accent so we don't introduce
+   transitions where they'd feel laggy (focus rings, hovers, etc.). */
+.q-npb-play,
+.q-mode-chip.is-excl,
+.q-eq-chip.is-on,
+.q-row.is-current,
+.q-album-row.is-current {
+  transition:
+    background-color 420ms ease,
+    border-color 420ms ease,
+    box-shadow 420ms ease,
+    color 420ms ease;
+}
+/* Keep the play button's existing 80ms press-shrink — overrides the rule
+   above just for the transform property so click feedback stays snappy. */
+.q-npb-play {
+  transition:
+    background-color 420ms ease,
+    box-shadow 420ms ease,
+    transform 80ms;
 }
 
 /* Canvas spectrum. Sized via attributes for the backing-store; the CSS
@@ -526,4 +584,52 @@ textarea:focus-visible,
   overflow-x: auto;
   contain: layout style;
   transform: translateZ(0);
+}
+
+/* v0.2.0 cover crossfade. Used by <CrossfadeCover> in the NowPlayingBar
+   (and other "now playing" surfaces where a snap-cut between album covers
+   is jarring). Old layer fades from 1 → 0, new layer fades from 0 → 1
+   over the same 320 ms window — net opacity stays at ~1 throughout so
+   there's no perceptible "flash" of the background between covers. */
+@keyframes cover-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes cover-fade-in  { from { opacity: 0; } to { opacity: 1; } }
+.q-cover-fadeout { animation: cover-fade-out 320ms ease forwards; pointer-events: none; }
+.q-cover-fadein  { animation: cover-fade-in  320ms ease forwards; }
+
+/* Inline cell-level link inside TrackList rows. The row itself has a play
+   onClick, so the artist + album cells stopPropagation and route to their
+   own navigation. The underline-on-hover affordance signals they behave
+   differently from "click anywhere on the row" (which plays). */
+.q-row-link { transition: color 140ms ease; }
+.q-row-link:hover {
+  color: var(--accent) !important;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+/* v0.2.0 screen transitions. The content panel is rendered with a
+   route-derived key, so every navigation (sidebar item, detail open/close,
+   settings) remounts the panel and fires this animation. Subtle: 8px
+   translateY, 220ms — enough to register as "the page changed" without
+   feeling sluggish or theatrical. Cubic-bezier matches material's
+   "decelerate" curve which feels natural for content arriving from below. */
+@keyframes screen-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.q-screen {
+  animation: screen-enter 220ms cubic-bezier(0.0, 0.0, 0.2, 1) both;
+  /* Hint the compositor so the transform doesn't trigger a layout repaint
+     each frame on slower hardware. Removed after the animation by browsers
+     that respect will-change auto-cleanup. */
+  will-change: opacity, transform;
+}
+
+/* Cards lift slightly on hover already (existing rule in this file). The
+   v0.2.0 addition is a soft accent-tinted glow under the cover so the
+   hover state ties visually to the dynamic-from-art accent. Keeps the
+   320 ms transform timing already in place — only adds box-shadow. */
+.q-card:hover .q-card-cover {
+  box-shadow: var(--shadow-art), 0 6px 18px -8px var(--accent-soft);
 }

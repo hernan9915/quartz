@@ -6,7 +6,18 @@ WASAPI exclusive mode, hi-res audio up to 32-bit / 384 kHz, gapless playback,
 configurable crossfade, parametric EQ, ReplayGain, full-text search,
 playlists, lyrics, listening stats, and **zero telemetry**.
 
-![Quartz screenshot](docs/screenshot.png)
+![Quartz — album grid](docs/screenshots/library-albums.png)
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/library-artists.png" alt="Artists view" /></td>
+<td width="50%"><img src="docs/screenshots/settings.png" alt="Settings" /></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/now-playing-fullscreen.png" alt="Full-screen player" /></td>
+<td width="50%"><img src="docs/screenshots/mini-player.png" alt="Mini player" /></td>
+</tr>
+</table>
 
 ## Why another music player
 

@@ -19,6 +19,11 @@ pub struct LibraryAlbum {
     pub sample_rate: Option<i32>,
     pub bits_per_sample: Option<i32>,
     pub cover_path: Option<String>,
+    /// Vibrant color extracted from cover_path, stored as `#rrggbb`. Set
+    /// lazily on first play (so we don't churn through 30k albums on
+    /// scan); `None` until extracted. The frontend falls back to the
+    /// user's chosen accent when this is missing.
+    pub accent_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,6 +121,10 @@ impl LibraryDb {
                 year INTEGER,
                 genre TEXT,
                 cover_path TEXT,
+                /* Vibrant accent extracted from the cover, stored as #rrggbb.
+                   Populated lazily on first play (avoids churning 30k+ rows
+                   during initial scan). NULL means "not extracted yet". */
+                accent_color TEXT,
                 UNIQUE(title, artist)
             );
 
@@ -220,6 +229,17 @@ impl LibraryDb {
                 .map_err(|e| e.to_string())?;
         }
 
+        // Migration: accent_color column added in v0.2.0 for dynamic per-album
+        // accents extracted from cover art. NULL is the "not extracted yet"
+        // sentinel; populated lazily by extract_album_accent on first play.
+        let has_accent_col = conn
+            .prepare("SELECT accent_color FROM albums LIMIT 1")
+            .is_ok();
+        if !has_accent_col {
+            conn.execute_batch("ALTER TABLE albums ADD COLUMN accent_color TEXT")
+                .map_err(|e| e.to_string())?;
+        }
+
         let has_rg_col = conn
             .prepare("SELECT replaygain_lufs FROM tracks LIMIT 1")
             .is_ok();
@@ -305,7 +325,8 @@ impl LibraryDb {
             .prepare(
                 "SELECT a.id, a.title, a.artist, a.year, a.genre, a.cover_path,
                         COUNT(t.id),
-                        MAX(t.sample_rate), MAX(t.bits_per_sample)
+                        MAX(t.sample_rate), MAX(t.bits_per_sample),
+                        a.accent_color
                  FROM albums a
                  LEFT JOIN tracks t ON t.album_id = a.id
                  GROUP BY a.id
@@ -325,11 +346,48 @@ impl LibraryDb {
                     track_count: row.get(6)?,
                     sample_rate: row.get(7)?,
                     bits_per_sample: row.get(8)?,
+                    accent_color: row.get(9)?,
                 })
             })
             .map_err(|e| e.to_string())?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    /// Read the cached extracted accent for an album. Returns None if the
+    /// album doesn't exist OR if extraction hasn't run yet.
+    pub fn get_album_accent(&self, album_id: i64) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT accent_color FROM albums WHERE id = ?1",
+            params![album_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Store the extracted accent hex (e.g. "#a78b3d") for an album. Pass
+    /// None to clear it (e.g. when cover art changes and we want to re-extract).
+    pub fn set_album_accent(&self, album_id: i64, accent: Option<&str>) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE albums SET accent_color = ?1 WHERE id = ?2",
+            params![accent, album_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Look up the cover path for an album. Used by extract_album_accent
+    /// to know which file to read for color extraction.
+    pub fn get_album_cover_path(&self, album_id: i64) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT cover_path FROM albums WHERE id = ?1",
+            params![album_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|e| e.to_string())
     }
 
     pub fn list_artists(&self) -> Result<Vec<LibraryArtist>, String> {
@@ -428,11 +486,13 @@ impl LibraryDb {
     }
 
     /// Set `cover_path` for an album. Used by the Cover Art Archive fetcher
-    /// to fill in missing embedded art.
+    /// to fill in missing embedded art. Also clears `accent_color` because
+    /// the previously extracted accent was based on the old cover (or no
+    /// cover at all) and is now stale — next play will re-extract.
     pub fn set_album_cover(&self, album_id: i64, cover_path: &str) -> Result<(), String> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE albums SET cover_path = ?1 WHERE id = ?2",
+            "UPDATE albums SET cover_path = ?1, accent_color = NULL WHERE id = ?2",
             params![cover_path, album_id],
         )
         .map_err(|e| e.to_string())?;
@@ -480,7 +540,8 @@ impl LibraryDb {
             .prepare(
                 "SELECT a.id, a.title, a.artist, a.year, a.genre, a.cover_path,
                         COUNT(t.id),
-                        MAX(t.sample_rate), MAX(t.bits_per_sample)
+                        MAX(t.sample_rate), MAX(t.bits_per_sample),
+                        a.accent_color
                  FROM albums a
                  LEFT JOIN tracks t ON t.album_id = a.id
                  WHERE a.artist = ?1
@@ -500,6 +561,7 @@ impl LibraryDb {
                     track_count: row.get(6)?,
                     sample_rate: row.get(7)?,
                     bits_per_sample: row.get(8)?,
+                    accent_color: row.get(9)?,
                 })
             })
             .map_err(|e| e.to_string())?;

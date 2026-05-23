@@ -1,7 +1,7 @@
 {
   "name": "quartz",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A bit-perfect Windows music player for your local library",
   "license": "MIT",
   "homepage": "https://github.com/hernan9915/quartz",
