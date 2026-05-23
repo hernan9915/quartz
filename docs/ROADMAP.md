@@ -15,6 +15,20 @@ the "natural next moves" if we're picking up from where we left off.
   added it to NowPlayingBar. The big covers in the full-screen view and
   the tiny one in the mini player would also benefit from crossfading
   on track change instead of snap-cutting.
+- **MiniPlayer should use the same backdrop as the FullscreenPlayer.**
+  Right now the mini player is a flat dark widget while the full-screen
+  view has a blurred-art backdrop with dynamic-accent vignette. Bring
+  the same treatment to the mini window so the two surfaces feel like
+  the same player at different zoom levels — not two different UIs.
+- **Transport controls in the MiniPlayer.** Currently only has
+  play/pause. Add prev / next (and probably shuffle / repeat) so it's
+  actually usable as a "I'm working in another app" control surface
+  without having to keep flipping back to the main window.
+- **Fix the waveform scrubber.** Known to be off — needs investigation.
+  Could be the render (peak normalization, the wipe-in animation, the
+  filled-vs-unfilled split), the click-to-seek behavior, or how it
+  syncs with the played position. Document the actual symptom when we
+  pick it up; might be small or might want a rewrite from scratch.
 - **Page transitions with shared-element art.** When you open an album
   from the grid, the cover thumbnail should animate to its larger
   position in the detail view (and back on close). Same for opening
