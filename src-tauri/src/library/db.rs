@@ -629,6 +629,42 @@ impl LibraryDb {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 
+    /// Single-track lookup by absolute path. Used by the mini-player
+    /// window, which previously loaded ALL tracks (40k rows ≈ several MB
+    /// of JSON across the IPC boundary) just to resolve the playing
+    /// path to a title + artist + album_id. `tracks.path` is UNIQUE so
+    /// this is an index hit.
+    pub fn get_track_by_path(&self, path: &str) -> Result<Option<LibraryTrack>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, album_id, track_no, disc_no, title, artist,
+                        duration, path, sample_rate, bits_per_sample
+                 FROM tracks WHERE path = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query_map(params![path], |row| {
+                Ok(LibraryTrack {
+                    id: row.get(0)?,
+                    album_id: row.get(1)?,
+                    track_no: row.get(2)?,
+                    disc_no: row.get(3)?,
+                    title: row.get(4)?,
+                    artist: row.get(5)?,
+                    duration: row.get(6)?,
+                    path: row.get(7)?,
+                    sample_rate: row.get(8)?,
+                    bits_per_sample: row.get(9)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        match rows.next() {
+            Some(r) => r.map(Some).map_err(|e| e.to_string()),
+            None => Ok(None),
+        }
+    }
+
     // ── Playlists ────────────────────────────────────────────────────
 
     pub fn create_playlist(

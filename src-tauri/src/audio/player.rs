@@ -344,6 +344,12 @@ pub enum AudioCommand {
     /// Update crossfade config (enabled flag + duration). Takes effect at the
     /// next track-end trigger, not retroactively to a fade already in flight.
     SetCrossfade(CrossfadeConfig),
+    /// Graceful audio-thread shutdown. Nothing sends this today — the
+    /// process exit tears the thread down and WASAPI handles are released
+    /// by COM teardown — but the receive arms reference it, and a future
+    /// "release device on minimize-to-tray" feature would send it. Kept
+    /// deliberately rather than removed-and-reinvented.
+    #[allow(dead_code)]
     Quit,
 }
 
@@ -835,6 +841,17 @@ fn play_file(
         buf_x16.max(half_sec)
     };
 
+    // Per-iteration decode budget. Topping the queue all the way up to
+    // queue_target in ONE decode_into call stalls this thread for as long
+    // as the codec takes to produce 0.5 s of audio — at 24/192 that's tens
+    // of milliseconds, longer than the ~10 ms exclusive-mode hardware
+    // buffer. The result was an underrun (audible stutter) right after
+    // every start / seek / gapless swap on hi-res tracks, where the queue
+    // begins near-empty. Capping each iteration's decode at a few buffers'
+    // worth lets device writes interleave with the backlog build-up; the
+    // queue still converges to queue_target within ~0.2 s of steady state.
+    let per_iter_decode = (total_buf_frames as usize * out_ch).saturating_mul(4);
+
     // Pre-fill JUST enough to cover the first WASAPI write (≈4 buffers worth).
     // The steady-state queue depth (queue_target) is much larger but doesn't
     // need to be filled before start_stream — the main loop tops it up as
@@ -987,8 +1004,10 @@ fn play_file(
             .get_available_space_in_frames()
             .map_err(|e| fmt_err(&*e))? as usize;
 
-        // Keep the decode queue topped up — well beyond what we're about to write
-        decode_into(&mut format_reader, &mut decoder, track_id, &mut sample_queue, &mut sample_buf, queue_target, &mut eof, out_ch);
+        // Keep the decode queue topped up — incrementally (see per_iter_decode
+        // above for why we must NOT decode all the way to queue_target here).
+        let top_up = sample_queue.len().saturating_add(per_iter_decode).min(queue_target);
+        decode_into(&mut format_reader, &mut decoder, track_id, &mut sample_queue, &mut sample_buf, top_up, &mut eof, out_ch);
 
         // ── Crossfade trigger ───────────────────────────────────────
         // Shared mode only — exclusive WASAPI sends raw samples to the DAC and
@@ -1070,17 +1089,21 @@ fn play_file(
         // path. The fade ends — and we swap "next" to "current" — once
         // pos_frames reaches the configured total.
         if crossfade.is_some() {
-            // Refill the next-track queue alongside the current one.
+            // Refill the next-track queue alongside the current one —
+            // incrementally, same rationale as the main top-up: a burst
+            // decode of the incoming track mid-fade would starve the writes
+            // of the outgoing one.
             // (Borrowing dance: take the mut ref inside a scoped block.)
             {
                 let xf = crossfade.as_mut().unwrap();
+                let xf_top_up = xf.sample_queue.len().saturating_add(per_iter_decode).min(queue_target);
                 decode_into(
                     &mut xf.format_reader,
                     &mut xf.decoder,
                     xf.track_id,
                     &mut xf.sample_queue,
                     &mut xf.sample_buf,
-                    queue_target,
+                    xf_top_up,
                     &mut xf.eof,
                     out_ch,
                 );

@@ -20,15 +20,18 @@
   inherits: true;
   initial-value: #8a754d;
 }
-
-/* Drive the accent variable transition from the root so EVERY descendant
-   that uses var(--accent) — direct or transitive — fades smoothly when
-   the value updates (track change, theme change, accent-name change). */
-:root {
-  transition: --accent 420ms ease, --accent-dim 420ms ease;
+@property --accent-soft {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(201, 169, 110, 0.12);
 }
 
 :root {
+  /* Drive the accent variable transitions from the root so EVERY
+     descendant that uses the vars — direct or transitive — fades smoothly
+     when the value updates (track change, theme change, accent change). */
+  transition: --accent 420ms ease, --accent-dim 420ms ease, --accent-soft 420ms ease;
+
   --bg: #0a0a0c;
   --bg-elev: #101013;
   --panel: #131316;
@@ -628,8 +631,12 @@ textarea:focus-visible,
 
 /* Cards lift slightly on hover already (existing rule in this file). The
    v0.2.0 addition is a soft accent-tinted glow under the cover so the
-   hover state ties visually to the dynamic-from-art accent. Keeps the
-   320 ms transform timing already in place — only adds box-shadow. */
+   hover state ties visually to the dynamic-from-art accent. box-shadow
+   is added to the cover's transition list (next rule) so the glow eases
+   in/out with the lift instead of snapping. */
+.q-card .q-card-cover {
+  transition: transform 320ms ease, box-shadow 320ms ease;
+}
 .q-card:hover .q-card-cover {
   box-shadow: var(--shadow-art), 0 6px 18px -8px var(--accent-soft);
 }

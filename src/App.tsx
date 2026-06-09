@@ -4981,29 +4981,34 @@ export default function App() {
   useEffect(() => { queueRef.current = queue; }, [queue]);
   useEffect(() => { queueIndexRef.current = queueIndex; }, [queueIndex]);
 
+  // The currently-playing album row, resolved once per (albums, id) change.
+  // Three consumers below (accent effect, lazy-extraction effect, and the
+  // FullscreenPlayer's dynamicAccentColor prop) previously each did their
+  // own linear .find() over the 3.7k-album array on every run.
+  const currentLibAlbum = useMemo(
+    () => currentLibAlbumId != null
+      ? libAlbums.find((a) => a.id === currentLibAlbumId) ?? null
+      : null,
+    [libAlbums, currentLibAlbumId],
+  );
+
   // Compute and apply the active accent. Depends on:
   //   - theme: each theme has its own variant of the named accents
   //   - accentName: user's chosen palette in Settings (fallback)
-  //   - dynamicAccent + currentLibAlbumId: when on, override accent with the
+  //   - dynamicAccent + currentLibAlbum: when on, override accent with the
   //     extracted vibrant color from the currently-playing album's cover
-  //   - libAlbums: source of truth for the extracted accent_color
-  // Track lookup is by id so re-renders are O(log n) on a 30k-album library.
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
-    const userAccent = getAccentHex(accentName, theme);
-    let active = userAccent;
-    if (dynamicAccent && currentLibAlbumId != null) {
-      const album = libAlbums.find((a) => a.id === currentLibAlbumId);
-      const extracted = album?.accent_color;
-      if (extracted) {
-        // Light/sepia themes need the accent darkened a touch so it
-        // reads as a tint on a light background. Dark/rose themes use
-        // it as-is (the Rust extractor already clamps lightness into
-        // a UI-friendly band).
-        active = (theme === "light" || theme === "sepia")
-          ? mix(extracted, "#000000", 0.28)
-          : extracted;
-      }
+    let active = getAccentHex(accentName, theme);
+    const extracted = dynamicAccent ? currentLibAlbum?.accent_color : null;
+    if (extracted) {
+      // Light/sepia themes need the accent darkened a touch so it
+      // reads as a tint on a light background. Dark/rose themes use
+      // it as-is (the Rust extractor already clamps lightness into
+      // a UI-friendly band).
+      active = (theme === "light" || theme === "sepia")
+        ? mix(extracted, "#000000", 0.28)
+        : extracted;
     }
     const accentDim = mix(active, "#000000", 0.35);
     const accentSoft = hexToRgba(active, 0.12);
@@ -5018,7 +5023,7 @@ export default function App() {
     // swap on every track change without each window doing its own IPC.
     try { localStorage.setItem("quartz:activeAccent", active); } catch {}
     void emit("accent-changed", active).catch(() => {});
-  }, [theme, accentName, dynamicAccent, currentLibAlbumId, libAlbums]);
+  }, [theme, accentName, dynamicAccent, currentLibAlbum]);
 
   // Lazy extraction trigger: when a track starts playing and the album's
   // accent_color is still NULL, ask Rust to extract + cache it. The fetch
@@ -5026,27 +5031,23 @@ export default function App() {
   // accent effect above picks it up on its next run. Skips if dynamicAccent
   // is off (no point burning CPU on extractions the user can't see).
   useEffect(() => {
-    if (!dynamicAccent || currentLibAlbumId == null) return;
-    const album = libAlbums.find((a) => a.id === currentLibAlbumId);
-    if (!album || album.accent_color) return; // already cached
+    if (!dynamicAccent || !currentLibAlbum || currentLibAlbum.accent_color) return;
+    const albumId = currentLibAlbum.id;
     let cancelled = false;
-    invoke<string | null>("get_album_accent_color", { albumId: currentLibAlbumId })
+    invoke<string | null>("get_album_accent_color", { albumId })
       .then((hex) => {
         if (cancelled || !hex) return;
         setLibAlbums((xs) => xs.map((a) =>
-          a.id === currentLibAlbumId ? { ...a, accent_color: hex } : a
+          a.id === albumId ? { ...a, accent_color: hex } : a
         ));
       })
       .catch((err) => console.error("[quartz] get_album_accent_color failed:", err));
     return () => { cancelled = true; };
-  }, [dynamicAccent, currentLibAlbumId, libAlbums]);
+  }, [dynamicAccent, currentLibAlbum]);
 
   const refreshAlbums = () => {
     invoke<LibraryAlbum[]>("list_albums")
-      .then((xs) => {
-        console.log("[quartz] albums:", xs.length);
-        setLibAlbums(xs);
-      })
+      .then(setLibAlbums)
       .catch((err) => console.error("[quartz] list_albums failed:", err));
     invoke<LibraryArtist[]>("list_artists")
       .then((xs) => setLibArtists(xs))
@@ -5171,19 +5172,31 @@ export default function App() {
       });
     });
     // spectrum-bins is now subscribed to directly by <SpectrumLive>.
-    const unlistenError = listen<string>("playback-error", (e) => {
-      console.error("[quartz] PLAYBACK ERROR:", e.payload);
-      // Auto-skip past the failing track. Rust emits playback-error and
-      // breaks the audio session WITHOUT firing track-ended, which means
-      // the queue would dead-end here without manual user action. Common
-      // causes: file deleted after scan, corrupt file, unsupported sample
-      // rate, device rejected exclusive mode. Re-using the same advance
-      // logic as track-ended keeps the queue moving.
+
+    // Shared queue-advance used by both track-ended (natural end) and
+    // playback-error (skip past a broken track). Reads only refs so the
+    // once-registered listeners never capture stale state.
+    //
+    // Critical ordering: queueIndexRef + setQueueIndex update synchronously
+    // BEFORE invoking play_file. If we waited for the invoke promise, a
+    // rapid second track-ended (short track) would read a stale index and
+    // either replay the same track or fail to advance. We also update the
+    // currently-shown album so NPB / FullscreenPlayer / mini player follow
+    // when the queue crosses an album boundary (Tracks tab, smart
+    // playlists, mixed-album queues), and pre-queue the track-after-next
+    // for gapless.
+    //
+    // `honorRepeatOne`: track-ended replays the current track on repeat-one;
+    // playback-error must NOT (that would retry the broken file forever).
+    const advanceQueue = (honorRepeatOne: boolean) => {
       const q = queueRef.current;
       const curIdx = queueIndexRef.current;
       if (q.length === 0) return;
-      // Don't infinite-loop on repeat-one — that's how the user gets stuck.
-      const effectiveRepeat = repeatModeRef.current === "one" ? "off" : repeatModeRef.current;
+      if (honorRepeatOne && repeatModeRef.current === "one") {
+        invoke("play_file", { path: q[curIdx].path }).catch(console.error);
+        return;
+      }
+      const repeat = repeatModeRef.current === "one" ? "off" : repeatModeRef.current;
       let nextIdx: number | null;
       if (shuffleRef.current && q.length > 1) {
         let r: number;
@@ -5192,72 +5205,31 @@ export default function App() {
       } else {
         const i = curIdx + 1;
         if (i < q.length) nextIdx = i;
-        else if (effectiveRepeat === "all") nextIdx = 0;
+        else if (repeat === "all") nextIdx = 0;
         else nextIdx = null;
       }
-      if (nextIdx !== null) {
-        const idx = nextIdx;
-        queueIndexRef.current = idx;
-        setQueueIndex(idx);
-        // If the new track is in a different album (e.g. Tracks tab,
-        // smart playlist, or any mixed-album queue), update the currently-
-        // shown album state. Without this, NowPlayingBar / FullscreenPlayer /
-        // mini player all keep showing the OLD album's artist + title.
-        setCurrentLibAlbumId(q[idx].album_id);
-        pushRecent(q[idx].album_id);
-        invoke("play_file", { path: q[idx].path }).catch(console.error);
-        invoke("log_play", { trackId: q[idx].id }).catch(() => {});
-        const nextNextIdx = computeNextIndex(idx, q.length);
-        pendingNextIdxRef.current = nextNextIdx;
-        if (nextNextIdx !== null) {
-          invoke("queue_next_track", { path: q[nextNextIdx].path }).catch(console.error);
-        }
+      if (nextIdx === null) return;
+      queueIndexRef.current = nextIdx;
+      setQueueIndex(nextIdx);
+      setCurrentLibAlbumId(q[nextIdx].album_id);
+      pushRecent(q[nextIdx].album_id);
+      invoke("play_file", { path: q[nextIdx].path }).catch(console.error);
+      invoke("log_play", { trackId: q[nextIdx].id }).catch(() => {});
+      const nextNextIdx = computeNextIndex(nextIdx, q.length);
+      pendingNextIdxRef.current = nextNextIdx;
+      if (nextNextIdx !== null) {
+        invoke("queue_next_track", { path: q[nextNextIdx].path }).catch(console.error);
       }
+    };
+
+    // Rust emits playback-error and breaks the audio session WITHOUT
+    // firing track-ended — without this skip the queue would dead-end on
+    // a deleted / corrupt / unsupported file.
+    const unlistenError = listen<string>("playback-error", (e) => {
+      console.error("[quartz] PLAYBACK ERROR:", e.payload);
+      advanceQueue(false);
     });
-    const unlistenEnded = listen("track-ended", () => {
-      const q = queueRef.current;
-      const curIdx = queueIndexRef.current;
-      if (q.length === 0) return;
-      if (repeatModeRef.current === "one") {
-        invoke("play_file", { path: q[curIdx].path }).catch(console.error);
-        return;
-      }
-      let nextIdx: number | null;
-      if (shuffleRef.current && q.length > 1) {
-        let r: number;
-        do {
-          r = Math.floor(Math.random() * q.length);
-        } while (r === curIdx);
-        nextIdx = r;
-      } else {
-        const i = curIdx + 1;
-        if (i < q.length) nextIdx = i;
-        else if (repeatModeRef.current === "all") nextIdx = 0;
-        else nextIdx = null;
-      }
-      if (nextIdx !== null) {
-        // Update queueIndex + ref synchronously BEFORE invoking play_file.
-        // If we waited for the invoke promise to resolve, the next track-ended
-        // (which can fire seconds later if it's a short track) would read a
-        // stale queueIndexRef and either replay the same track or fail to
-        // advance. Also pre-queue the track-after-that for gapless.
-        const idx = nextIdx;
-        queueIndexRef.current = idx;
-        setQueueIndex(idx);
-        // Also update the currently-shown album so the UI (NPB, FullscreenPlayer,
-        // mini player) reflects the new album when auto-advance crosses an
-        // album boundary (Tracks tab, smart playlists, Favorites, mixed queues).
-        setCurrentLibAlbumId(q[idx].album_id);
-        pushRecent(q[idx].album_id);
-        invoke("play_file", { path: q[idx].path }).catch(console.error);
-        invoke("log_play", { trackId: q[idx].id }).catch(() => {});
-        const nextNextIdx = computeNextIndex(idx, q.length);
-        pendingNextIdxRef.current = nextNextIdx;
-        if (nextNextIdx !== null) {
-          invoke("queue_next_track", { path: q[nextNextIdx].path }).catch(console.error);
-        }
-      }
-    });
+    const unlistenEnded = listen("track-ended", () => advanceQueue(true));
     // Gapless: engine crossed a track boundary seamlessly — advance the queue
     // index and send the next-next track without calling play_file.
     const unlistenChanged = listen("track-changed", () => {
@@ -5695,13 +5667,15 @@ export default function App() {
     pushRecent(t.album_id);
     invoke("play_file", { path: t.path }).catch(console.error);
     invoke("log_play", { trackId: t.id }).catch(() => {});
-    // Pre-queue next for gapless auto-advance.
-    const nextIdx = index + 1 < tracks.length ? index + 1 : null;
+    // Pre-queue next for gapless auto-advance — computeNextIndex (rather
+    // than a bare index+1) keeps the pre-queued track consistent with the
+    // active shuffle / repeat mode, matching what track-changed will pick.
+    const nextIdx = computeNextIndex(index, tracks.length);
     pendingNextIdxRef.current = nextIdx;
     if (nextIdx !== null) {
       invoke("queue_next_track", { path: tracks[nextIdx].path }).catch(console.error);
     }
-  }, [setCurrentLibAlbumId, setQueue, setQueueIndex, pushRecent]);
+  }, [setCurrentLibAlbumId, setQueue, setQueueIndex, pushRecent]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Play an album without opening the detail view (used by hover-play in the grid).
   const quickPlayAlbum = useCallback(async (libId: number) => {
@@ -5714,8 +5688,8 @@ export default function App() {
       pushRecent(libId);
       await invoke("play_file", { path: tracks[0].path });
       invoke("log_play", { trackId: tracks[0].id }).catch(() => {});
-      // Pre-queue next for gapless auto-advance.
-      const nextIdx = tracks.length > 1 ? 1 : null;
+      // Pre-queue next for gapless auto-advance (shuffle/repeat-aware).
+      const nextIdx = computeNextIndex(0, tracks.length);
       pendingNextIdxRef.current = nextIdx;
       if (nextIdx !== null) {
         invoke("queue_next_track", { path: tracks[nextIdx].path }).catch(console.error);
@@ -5723,7 +5697,7 @@ export default function App() {
     } catch (err) {
       console.error("[quartz] quickPlayAlbum failed:", err);
     }
-  }, [setCurrentLibAlbumId, setQueue, setQueueIndex, pushRecent]);
+  }, [setCurrentLibAlbumId, setQueue, setQueueIndex, pushRecent]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Stable adapter callbacks for the grid → keeps memoized AlbumCard from
   // re-rendering on every parent render. Each card receives identity-stable
@@ -6659,11 +6633,7 @@ export default function App() {
         onOpenMiniPlayer={openMiniPlayer}
         accentName={accentName}
         dynamicAccent={dynamicAccent}
-        dynamicAccentColor={
-          currentLibAlbumId != null
-            ? (libAlbums.find((a) => a.id === currentLibAlbumId)?.accent_color ?? null)
-            : null
-        }
+        dynamicAccentColor={currentLibAlbum?.accent_color ?? null}
         scrubStyle={scrubStyle}
         waveformPeaks={currentWaveform}
         currentTrackId={currentTrackId ?? null}
@@ -8737,7 +8707,11 @@ export function MiniPlayerApp() {
   // pattern as the main window; no second `listen()` here.
   const pbState = usePbState();
   const [albums, setAlbums] = useState<LibraryAlbum[]>([]);
-  const [trackMap, setTrackMap] = useState<Record<string, LibraryTrack>>({});
+  // The playing track's library row, resolved per path change. Used to be
+  // a Record built from list_all_tracks — 40k rows ≈ several MB of JSON
+  // deserialized in this window just to map one path → title/artist.
+  // get_track_by_path is a single UNIQUE-index hit instead.
+  const [libTrack, setLibTrack] = useState<LibraryTrack | null>(null);
 
   useEffect(() => {
     // Seed the store immediately from the engine's current state so the
@@ -8747,15 +8721,18 @@ export function MiniPlayerApp() {
       pbSubscribers.forEach((fn) => fn());
     }).catch(() => {});
     invoke<LibraryAlbum[]>("list_albums").then(setAlbums).catch(() => {});
-    // list_all_tracks is heavy — run in bg; trackMap populates once ready.
-    invoke<LibraryTrack[]>("list_all_tracks")
-      .then((ts) => {
-        const m: Record<string, LibraryTrack> = {};
-        ts.forEach((t) => { m[t.path] = t; });
-        setTrackMap(m);
-      })
-      .catch(() => {});
   }, []);
+
+  // Resolve the playing path to its library row whenever the track changes.
+  const playingPath = pbState.track?.path ?? null;
+  useEffect(() => {
+    if (!playingPath) { setLibTrack(null); return; }
+    let cancelled = false;
+    invoke<LibraryTrack | null>("get_track_by_path", { path: playingPath })
+      .then((t) => { if (!cancelled) setLibTrack(t); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [playingPath]);
 
   const albumMap = useMemo<Record<number, LibraryAlbum>>(() => {
     const m: Record<number, LibraryAlbum> = {};
@@ -8763,7 +8740,6 @@ export function MiniPlayerApp() {
     return m;
   }, [albums]);
 
-  const libTrack = pbState.track ? trackMap[pbState.track.path] : null;
   const album = libTrack ? albumMap[libTrack.album_id] : null;
   const artUrl = album?.cover_path ? fileSrc(album.cover_path) : null;
 

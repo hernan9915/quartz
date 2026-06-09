@@ -299,6 +299,13 @@ async fn get_album_accent_color(
     Ok(result)
 }
 
+/// Resolve one track by absolute path. The mini-player uses this instead
+/// of list_all_tracks — one indexed row instead of the whole library.
+#[tauri::command]
+fn get_track_by_path(path: String, state: State<AppState>) -> Result<Option<LibraryTrack>, String> {
+    state.library.get_track_by_path(&path)
+}
+
 #[tauri::command]
 async fn list_all_tracks(state: State<'_, AppState>) -> Result<Vec<LibraryTrack>, String> {
     // 30k+ track libraries take ~hundreds of ms to read+serialize — push it
@@ -1425,6 +1432,7 @@ pub fn run() {
             list_artists,
             list_albums_by_artist,
             list_all_tracks,
+            get_track_by_path,
             fetch_artist_photos,
             wipe_artist_images,
             wipe_library,
