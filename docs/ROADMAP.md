@@ -51,13 +51,11 @@ the "natural next moves" if we're picking up from where we left off.
   the v0.1.0 release notes; deferred). Symphonia doesn't decode DSD
   natively — would need DSD-to-PCM conversion or DSD-as-DoP for DACs
   that support it. Niche but signals "real audiophile player".
-- **Track-info richness via Rust.** `TrackInfo` currently only carries
-  audio-format fields (path, sample rate, bits). Add title + artist +
-  album_id so the mini player doesn't need its `trackMap` path lookup
-  (currently fragile to path-normalization mismatches).
-- **AudioCommand::Quit cleanup.** Dead-code warning since v0.1.0 — the
-  variant exists but is never sent. Either wire up a shutdown path that
-  uses it (graceful audio thread teardown on app close) or remove it.
+
+(Two former items here — TrackInfo richness for the mini player and the
+AudioCommand::Quit dead-code warning — were resolved in the post-v0.2.0
+quality pass: the mini player now resolves the playing track via a
+single get_track_by_path lookup, and Quit carries an intent annotation.)
 
 ### Library / browsing
 

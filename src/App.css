@@ -157,9 +157,9 @@ button {
    gap blew past 92 px and compressed everything together. 128 px gives
    us 14 px of dedicated space above the waveform for the play button's
    glow to fade out cleanly. */
-.app-shell[data-scrub="waveform"] {
-  grid-template-rows: 36px 1fr 128px;
-}
+/* Waveform mode matches the flat-bar bottom row (92 px) — the
+   side-by-side center layout means it no longer needs extra height.
+   (It was 128 px back when transport + waveform were stacked.) */
 
 .middle-row {
   display: grid;
@@ -456,14 +456,26 @@ textarea:focus-visible,
 .q-npb-right { display: flex; align-items: center; justify-content: flex-end; gap: 22px; }
 .q-npb-transport { display: flex; justify-content: center; align-items: center; gap: 22px; }
 
-/* Phase 28 — when the waveform scrubber is enabled the scrub row is
-   ~30 px taller than the flat-bar mode, which makes the transport
-   buttons feel cramped against it. The modifier opens up vertical
-   breathing room around the transport without affecting flat-bar mode.
-   The bottom padding on the transport row in particular keeps the
-   play button's accent glow from bleeding into the top of the waveform. */
-.q-npb-center[data-scrub="waveform"] { gap: 22px; }
-.q-npb-center[data-scrub="waveform"] .q-npb-transport { padding: 6px 0 14px; gap: 26px; }
+/* Waveform mode narrows the fixed art+meta column (320 → 272 px) so the
+   transport cluster pulls left toward the track info instead of floating
+   mid-bar. Track titles ellipsize ~50 px sooner — fine, they already do. */
+.q-npb[data-scrub="waveform"] {
+  grid-template-columns: 272px 1fr 360px;
+}
+
+/* Waveform mode lays the center column out HORIZONTALLY — transport
+   cluster on the left, waveform filling the rest — instead of stacking
+   them. The stacked version left the (short) waveform floating in dead
+   vertical space; side-by-side lets the waveform run tall (56 px) and
+   the whole bar get shorter. Flat-bar mode keeps the stacked layout —
+   a 3 px bar next to the buttons would look lost. */
+.q-npb-center[data-scrub="waveform"] {
+  flex-direction: row;
+  align-items: center;
+  gap: 20px;
+}
+.q-npb-center[data-scrub="waveform"] .q-npb-transport { flex-shrink: 0; gap: 18px; }
+.q-npb-center[data-scrub="waveform"] .q-npb-scrub { flex: 1; min-width: 0; }
 .q-npb-art {
   flex-shrink: 0;
   width: 60px;

@@ -977,7 +977,13 @@ fn decode_waveform_cache(bytes: &[u8]) -> Option<Vec<f32>> {
 }
 
 /// Decode the full file via Symphonia and bin samples into `num_peaks`
-/// equal-width windows, taking the max-absolute-amplitude in each window.
+/// equal-width windows, taking the RMS amplitude of each window.
+///
+/// RMS, not max-abs: at 500 bins a 4-minute track puts ~0.5 s of audio in
+/// each window, and the max-abs of any half second of modern music is
+/// essentially always at the mastering ceiling — every bin pegged ≈ 1.0
+/// and the waveform rendered as a featureless brick. RMS tracks the
+/// energy envelope, which is what a waveform display is supposed to show.
 /// Memory-bounded: O(num_peaks) — we don't hold the full decoded audio.
 ///
 /// Cost: roughly the same as a single FLAC playthrough, run as fast as the
@@ -1013,28 +1019,26 @@ fn compute_waveform_peaks(path: &str, num_peaks: usize) -> Result<Vec<f32>, Stri
     let channels = params.channels.map(|c| c.count()).unwrap_or(2);
 
     // n_frames is provided by sized media (FLAC, WAV, MP3 w/ Xing, etc.).
-    // Without it we can't map samples to bins on-the-fly. Symphonia falls
-    // through to the duration field for some formats — keep that as a
-    // fallback so e.g. tag-less WAV files still produce a usable waveform.
+    // Without it we can't map samples to bins exactly, so assume 60 s —
+    // longer files compress their tail into the last bin, shorter ones
+    // leave trailing empty bins, but the shape stays usable either way.
+    // (An earlier fallback read TimeBase.numer, which is ≡ 1 for typical
+    // 1/sample_rate time bases — total_frames=1 collapsed the ENTIRE
+    // waveform into the last bin, and the garbage persisted to cache.)
     let total_frames = match params.n_frames {
         Some(n) if n > 0 => n,
-        _ => {
-            let sample_rate = params.sample_rate.unwrap_or(44100) as u64;
-            params
-                .time_base
-                .and_then(|tb| {
-                    params.n_frames.map(|n| n.max(1))
-                        .or_else(|| Some((tb.numer as u64).max(1)))
-                })
-                .unwrap_or(sample_rate * 60) // assume 60s; produces a sparse but valid waveform
-        }
+        _ => params.sample_rate.unwrap_or(44100) as u64 * 60,
     };
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&params, &DecoderOptions::default())
         .map_err(|e| e.to_string())?;
 
-    let mut peaks = vec![0.0f32; num_peaks];
+    // RMS accumulators per bin: Σ(amp²) and frame count. f64 because a
+    // 192 kHz track puts ~10⁵ squared samples in each bin — f32 summation
+    // would lose precision long before that.
+    let mut sum_sq = vec![0.0f64; num_peaks];
+    let mut counts = vec![0u64; num_peaks];
     let mut frame_pos: u64 = 0;
     let mut sbuf: Option<SampleBuffer<f32>> = None;
     let n_peaks_u64 = num_peaks as u64;
@@ -1074,9 +1078,8 @@ fn compute_waveform_peaks(path: &str, num_peaks: usize) -> Result<Vec<f32>, Stri
                             let bin = (((frame_pos + i as u64) * n_peaks_u64) / total_frames)
                                 as usize;
                             let bin = bin.min(last_bin);
-                            if amp > peaks[bin] {
-                                peaks[bin] = amp;
-                            }
+                            sum_sq[bin] += (amp as f64) * (amp as f64);
+                            counts[bin] += 1;
                         }
                         frame_pos += pkt_frames as u64;
                     }
@@ -1087,6 +1090,14 @@ fn compute_waveform_peaks(path: &str, num_peaks: usize) -> Result<Vec<f32>, Stri
             Err(_) => break,
         }
     }
+
+    // Finalize: RMS per bin. Empty bins (track shorter than n_frames
+    // claimed, or trailing silence trimmed by the codec) stay 0.0.
+    let peaks: Vec<f32> = sum_sq
+        .iter()
+        .zip(counts.iter())
+        .map(|(&sq, &n)| if n > 0 { (sq / n as f64).sqrt() as f32 } else { 0.0 })
+        .collect();
 
     Ok(peaks)
 }
@@ -1105,7 +1116,10 @@ async fn get_waveform(
     let waveform_dir = state.waveform_dir.clone();
 
     tokio::task::spawn_blocking(move || {
-        let cache_path = waveform_dir.join(format!("track-{}-{}.qwf", track_id, n));
+        // "v2" = RMS bins (v1 was max-abs, which rendered as a brick on
+        // modern masters). Old v1 files are simply orphaned — small, and
+        // clear_waveforms still wipes the whole directory.
+        let cache_path = waveform_dir.join(format!("track-{}-{}-v2.qwf", track_id, n));
 
         // Cache hit
         if let Ok(bytes) = std::fs::read(&cache_path) {
@@ -1145,7 +1159,7 @@ async fn scan_waveforms(
         let mut done = 0usize;
 
         for (i, t) in tracks.iter().enumerate() {
-            let cache_path = waveform_dir.join(format!("track-{}-{}.qwf", t.id, n));
+            let cache_path = waveform_dir.join(format!("track-{}-{}-v2.qwf", t.id, n));
             if cache_path.exists() {
                 // Already cached; count toward progress but don't recompute.
             } else if let Ok(peaks) = compute_waveform_peaks(&t.path, n) {

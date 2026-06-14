@@ -5,6 +5,57 @@ All notable changes to Quartz are documented here.
 The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Mini player parity + transport.** The mini player now shares the
+  full-screen player's blurred-cover-art backdrop and dynamic-accent
+  vignette, and gained prev / next buttons (routed through the main
+  window's queue via the existing media-button channel).
+- **Cover crossfades everywhere.** The full-screen player's large art +
+  backdrop and the mini player's thumbnail now crossfade on track change,
+  matching the now-playing bar.
+- **Clickable artist / album in the now-playing bar** — same navigation
+  affordance as the Tracks tab.
+- **Time-label toggle** — click the remaining-time label (now-playing bar
+  or full-screen player) to switch to total duration.
+- **Scroll-wheel volume** over the whole volume knob.
+- **`S` / `R` keyboard shortcuts** for shuffle and repeat.
+- **OS window title** reflects the playing track (taskbar / Alt-Tab).
+
+### Changed
+- **Shuffle is now a true permutation.** A Fisher-Yates bag plays every
+  track once per pass before repeating, shared by every advance path
+  (manual, auto, gapless pre-queue). Toggling shuffle / repeat re-syncs
+  the engine's pre-queued next so it takes effect at the very next
+  boundary. **Prev** respects actual play history (returns to what you
+  just heard, not queue-order − 1).
+- **Waveform scrubber** uses RMS bins (real dynamics instead of a
+  brick), a side-by-side transport + waveform layout, and renders the
+  same height as flat-bar mode.
+
+### Fixed
+- **Hi-res gapless stutter — eliminated.** Opening the next track
+  (file I/O + FLAC-header parse + decoder alloc + prefill decode) is now
+  done on a dedicated helper thread instead of synchronously on the
+  real-time audio thread. The old reactive open ran at the boundary when
+  the decode queue had drained to just the ~10 ms hardware tail — which
+  the in-memory queue cannot refill while the thread is blocked in I/O —
+  overrunning it at 192 kHz. The next track is now pre-opened during the
+  current one and swapped in as a move.
+- **Seek stutter** on hi-res — the queue refills in one prefill after a
+  seek instead of trickling under the per-iteration decode cap.
+- **Waveform collapse** for files without a frame count (the fallback
+  read `TimeBase.numer` ≡ 1, packing the whole waveform into the last
+  bin and caching the garbage).
+- **Album info now follows cross-album auto-advance** (Tracks tab, smart
+  playlists, mixed queues) across every advance path.
+- **Drag-reorder of Up Next** now takes effect at the next boundary (the
+  pre-queued next + engine path are re-synced to the new order).
+- Numerous shuffle / queue edge cases surfaced by adversarial review
+  (orphaned shuffle-bag draws on manual skip, stale `pendingNextIdxRef`,
+  dead nav links while Settings/playlist open, crossfade-layer keys).
+
 ## [0.2.0] — 2026-05-22
 
 ### Added

@@ -889,6 +889,54 @@ fn play_file(
     let mut crossfade: Option<CrossfadeState> = None;
     let mut xf_skip_current_queued = false;
 
+    // ── Off-thread track opener ─────────────────────────────────────
+    // The next track is opened + prefill-decoded on a HELPER thread, never
+    // on this real-time audio thread. This is the crux of the hi-res
+    // gapless fix: a synchronous File::open + FLAC-header parse + decoder
+    // alloc can take longer than the ~10 ms WASAPI hardware buffer, and —
+    // critically — the in-memory decode queue does NOT protect the DAC
+    // during such a block (queued PCM can't reach the device while the
+    // thread is stuck in I/O; only the hardware buffer feeds the DAC). So
+    // ANY open on this thread risks an underrun regardless of queue depth.
+    // Moving it off-thread removes the entire class of stall.
+    //
+    // Protocol: audio thread sends one OpenRequest when it has a queued-next
+    // it hasn't requested yet; opener replies with OpenResult. The audio
+    // thread polls (try_recv, non-blocking) and adopts the result only if it
+    // still wants that path. The opener exits when the request sender drops
+    // (i.e. when play_file returns).
+    let (open_req_tx, open_req_rx) = bounded::<OpenRequest>(2);
+    let (open_res_tx, open_res_rx) = bounded::<OpenResult>(2);
+    // Detached — the thread exits on its own when open_req_tx drops (i.e.
+    // when play_file returns through any path). No join needed.
+    thread::spawn(move || {
+        while let Ok(req) = open_req_rx.recv() {
+            match try_open_for_gapless(&req.path, req.required_rate) {
+                Some(mut gt) => {
+                    let mut q: Vec<f32> = Vec::with_capacity(req.prefill);
+                    let mut sb: Option<SampleBuffer<f32>> = None;
+                    let mut e = false;
+                    decode_into(&mut gt.format_reader, &mut gt.decoder, gt.track_id,
+                                &mut q, &mut sb, req.prefill, &mut e, req.out_ch);
+                    let _ = open_res_tx.send(OpenResult::Ready(
+                        req.path,
+                        PreparedGapless { track: gt, sample_queue: q, sample_buf: sb, eof: e },
+                    ));
+                }
+                None => { let _ = open_res_tx.send(OpenResult::Unusable(req.path)); }
+            }
+        }
+    });
+
+    // Pre-opened next track, ready to swap at the boundary. `prepared_path`
+    // records which path it holds; `prepared_mismatch` latches a rate-
+    // incompatible next; `requested_path` tracks what's currently in flight
+    // at the opener so we don't double-request.
+    let mut prepared: Option<PreparedGapless> = None;
+    let mut prepared_path: Option<PathBuf> = None;
+    let mut prepared_mismatch = false;
+    let mut requested_path: Option<PathBuf> = None;
+
     // ── Main loop ───────────────────────────────────────────────────
     loop {
         // Commands (non-blocking)
@@ -937,9 +985,18 @@ fn play_file(
                     );
                     decoder.reset();
                     sample_queue.clear();
+                    eof = false;
                     position_frames = (secs * out_rate as f64) as u64;
                     // Clear biquad history to avoid filter transients at the splice.
                     if let Some(ref mut proc) = eq_processor { proc.reset(); }
+                    // Refill the prefill in one shot, right here, before
+                    // returning to the write loop. Otherwise the cleared queue
+                    // would rebuild only `per_iter_decode` per iteration while
+                    // the hardware buffer drains — audible as a post-seek
+                    // stutter on hi-res, where each FLAC packet is large.
+                    decode_into(&mut format_reader, &mut decoder, track_id,
+                                &mut sample_queue, &mut sample_buf, prefill_target,
+                                &mut eof, out_ch);
                 }
                 Ok(AudioCommand::Volume(v)) => {
                     local_volume = v.clamp(0.0, 1.0);
@@ -979,6 +1036,14 @@ fn play_file(
                     }
                 }
                 Ok(AudioCommand::QueueNext(p)) => {
+                    // A new next-track invalidates any pre-open (and any
+                    // in-flight request) for the old one.
+                    if queued_next.as_ref() != Some(&p) {
+                        prepared = None;
+                        prepared_path = None;
+                        prepared_mismatch = false;
+                        requested_path = None;
+                    }
                     queued_next = Some(p);
                     // Re-arm the crossfade trigger for the new candidate.
                     xf_skip_current_queued = false;
@@ -1009,6 +1074,45 @@ fn play_file(
         let top_up = sample_queue.len().saturating_add(per_iter_decode).min(queue_target);
         decode_into(&mut format_reader, &mut decoder, track_id, &mut sample_queue, &mut sample_buf, top_up, &mut eof, out_ch);
 
+        // ── Off-thread gapless prepare ──────────────────────────────
+        // Non-blocking: adopt any finished open from the helper thread, then
+        // request the queued-next open if one isn't already prepared or in
+        // flight. No file I/O happens on this thread.
+        //
+        // Adopt only if we still want the path the opener returned — a late
+        // QueueNext can change queued_next while an open is in flight, in
+        // which case the stale result is dropped and the new path requested.
+        while let Ok(res) = open_res_rx.try_recv() {
+            match res {
+                OpenResult::Ready(path, pg) => {
+                    if queued_next.as_ref() == Some(&path) {
+                        prepared = Some(pg);
+                        prepared_path = Some(path);
+                    }
+                    // else: stale (queued_next moved on) — drop it.
+                }
+                OpenResult::Unusable(path) => {
+                    if queued_next.as_ref() == Some(&path) {
+                        prepared_mismatch = true;
+                        prepared_path = Some(path);
+                    }
+                }
+            }
+        }
+        if crossfade.is_none() && prepared.is_none() && !prepared_mismatch {
+            if let Some(np) = queued_next.clone() {
+                if requested_path.as_ref() != Some(&np) {
+                    // try_send: if the opener is momentarily busy (channel
+                    // full), skip — we'll retry next iteration. Only mark
+                    // requested on a successful enqueue.
+                    let req = OpenRequest { path: np.clone(), required_rate: sample_rate, out_ch, prefill: prefill_target };
+                    if open_req_tx.try_send(req).is_ok() {
+                        requested_path = Some(np);
+                    }
+                }
+            }
+        }
+
         // ── Crossfade trigger ───────────────────────────────────────
         // Shared mode only — exclusive WASAPI sends raw samples to the DAC and
         // can't mix two streams. If the trigger conditions are all met and the
@@ -1032,6 +1136,12 @@ fn play_file(
             let remaining = total_track_frames.saturating_sub(position_frames);
             if remaining <= xf_total {
                 let candidate = queued_next.take().unwrap();
+                // The crossfade owns the transition now and opens its own
+                // decoder — drop any pre-open / in-flight request for it.
+                prepared = None;
+                prepared_path = None;
+                prepared_mismatch = false;
+                requested_path = None;
                 match try_open_for_gapless(&candidate, sample_rate) {
                     Some(gt) => {
                         // Build the crossfade state and pre-fill enough of the
@@ -1207,7 +1317,11 @@ fn play_file(
                     s.duration = xf.duration_secs;
                     s.position = 0.0;
                     let _ = app.emit("playback-state", s.clone());
-                    let _ = app.emit("track-changed", ());
+                    // Payload = the path we actually switched to. The
+                    // frontend resolves its queue index from this rather
+                    // than trusting its own pre-queue bookkeeping, which
+                    // can go stale across reorders / mode toggles.
+                    let _ = app.emit("track-changed", xf.next_path.display().to_string());
                 }
             }
 
@@ -1252,13 +1366,48 @@ fn play_file(
                 // All decoded audio for this track has been written to WASAPI.
                 // The hardware buffer is still draining — don't stop the stream.
                 if let Some(next_path) = queued_next.take() {
-                    match try_open_for_gapless(&next_path, sample_rate) {
-                        Some(gt) => {
+                    // Prefer the eagerly pre-opened track (no blocking I/O at
+                    // the boundary). Fall back to a synchronous open only if
+                    // the pre-open didn't run (e.g. queued too late) — and
+                    // honor a latched rate-mismatch without re-probing disk.
+                    let matches_prepared = prepared_path.as_ref() == Some(&next_path);
+                    let pre = if matches_prepared { prepared.take() } else { None };
+                    let known_mismatch = matches_prepared && prepared_mismatch;
+                    // Consumed (or invalidated) this candidate — reset bookkeeping.
+                    prepared = None;
+                    prepared_path = None;
+                    prepared_mismatch = false;
+                    requested_path = None;
+
+                    // Resolve to a ready (track, prefilled-queue, sample_buf, eof),
+                    // or None meaning "needs WASAPI reinit" (rate mismatch).
+                    let ready: Option<(GaplessTrack, Vec<f32>, Option<SampleBuffer<f32>>, bool)> =
+                        if let Some(p) = pre {
+                            Some((p.track, p.sample_queue, p.sample_buf, p.eof))
+                        } else if known_mismatch {
+                            None
+                        } else {
+                            // Fallback: open now and decode the prefill inline.
+                            match try_open_for_gapless(&next_path, sample_rate) {
+                                Some(mut gt) => {
+                                    let mut q: Vec<f32> = Vec::with_capacity(prefill_target);
+                                    let mut sb: Option<SampleBuffer<f32>> = None;
+                                    let mut e = false;
+                                    decode_into(&mut gt.format_reader, &mut gt.decoder, gt.track_id,
+                                                &mut q, &mut sb, prefill_target, &mut e, out_ch);
+                                    Some((gt, q, sb, e))
+                                }
+                                None => None,
+                            }
+                        };
+
+                    match ready {
+                        Some((gt, pre_q, pre_sb, pre_eof)) => {
                             // Same sample rate → swap decoders without stopping
                             // the stream. The WASAPI buffer still has the tail
-                            // of the current track playing while we pre-fill
-                            // from the next one — zero audible gap.
-                            let gapless_codec = gt.codec; // extract String before partial moves
+                            // of the current track playing while the (already
+                            // prefilled) next queue takes over — zero gap.
+                            let gapless_codec = gt.codec; // extract before partial moves
                             format_reader    = gt.format_reader;
                             decoder          = gt.decoder;
                             track_id         = gt.track_id;
@@ -1266,23 +1415,18 @@ fn play_file(
                             src_channels     = gt.src_channels;
                             bits             = gt.bits;
                             path_for_restart = next_path.clone();
-                            eof = false;
-                            position_frames = 0;
-                            last_progress = Instant::now();
-                            last_spectrum = Instant::now();
+                            eof              = pre_eof;
+                            position_frames  = 0;
+                            last_progress    = Instant::now();
+                            last_spectrum    = Instant::now();
                             spectrum_accum.clear();
-                            // Spec (channels / bit depth) may differ across tracks
-                            // even at matching rate — discard the old SampleBuffer
-                            // so decode_into rebuilds one with the new spec.
-                            sample_buf = None;
+                            // The prefill was already decoded (eagerly, or in the
+                            // fallback above) — just adopt the queue + its buffer.
+                            sample_queue = pre_q;
+                            sample_buf   = pre_sb;
                             // Reset biquad delay states to prevent filter transients
                             // at the track boundary.
                             if let Some(ref mut proc) = eq_processor { proc.reset(); }
-                            // Pre-decode enough frames so the next write loop
-                            // iteration has data ready immediately.
-                            let prefill = (total_buf_frames as usize * out_ch).saturating_mul(4);
-                            decode_into(&mut format_reader, &mut decoder, track_id,
-                                        &mut sample_queue, &mut sample_buf, prefill, &mut eof, out_ch);
                             // Notify UI using the now-updated local variables.
                             {
                                 let mut s = state.lock().unwrap();
@@ -1298,12 +1442,13 @@ fn play_file(
                                 s.position = 0.0;
                                 let _ = app.emit("playback-state", s.clone());
                             }
-                            let _ = app.emit("track-changed", ());
+                            // Path payload — see the crossfade emit above.
+                            let _ = app.emit("track-changed", path_for_restart.display().to_string());
                         }
                         None => {
                             // Different sample rate or unreadable file.
                             // Must reinit WASAPI — brief gap is unavoidable.
-                            let _ = app.emit("track-changed", ());
+                            let _ = app.emit("track-changed", next_path.display().to_string());
                             let _ = audio_client.stop_stream();
                             return Ok(PlayResult::Switch(next_path, None));
                         }
@@ -1494,6 +1639,43 @@ struct GaplessTrack {
     src_channels:  usize,
     bits:          u32,
     codec:         String,
+}
+
+/// The queued-next track, opened AND pre-decoded ahead of the boundary —
+/// during the current track's steady-state slack, when the ~0.5 s decode
+/// queue gives plenty of headroom to absorb the file I/O + header parse +
+/// decoder allocation + prefill decode.
+///
+/// Opening reactively at the boundary (the old behavior) ran all of that
+/// synchronously on the real-time audio thread at the exact moment the
+/// decode queue had drained to just the hardware tail. At 192 kHz that
+/// tail is ~10 ms and the open overran it → underrun → the hi-res gapless
+/// stutter. Swapping a PreparedGapless in at the boundary is just a move.
+struct PreparedGapless {
+    track:        GaplessTrack,
+    sample_queue: Vec<f32>,
+    sample_buf:   Option<SampleBuffer<f32>>,
+    eof:          bool,
+}
+
+/// Work item for the off-thread opener: open + prefill-decode `path`,
+/// verifying it matches the running stream's `required_rate`. `out_ch` and
+/// `prefill` are passed so the helper de-interleaves to the right channel
+/// count and pre-decodes the same amount the audio thread would.
+struct OpenRequest {
+    path:          PathBuf,
+    required_rate: u32,
+    out_ch:        usize,
+    prefill:       usize,
+}
+
+/// Result handed back from the opener. `path` is echoed so the audio thread
+/// can confirm it still wants this track (queued-next may have changed
+/// while the open was in flight) before adopting it.
+enum OpenResult {
+    Ready(PathBuf, PreparedGapless),
+    /// Rate mismatch or unreadable — the boundary must reinit WASAPI.
+    Unusable(PathBuf),
 }
 
 /// Open `path` and verify it can be played on the already-running WASAPI

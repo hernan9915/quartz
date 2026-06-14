@@ -601,6 +601,7 @@ function CrossfadeCover({ album, size = 60 }: CoverProps) {
     <div style={{ position: "relative", width: size, height: size }}>
       {prev && (
         <div
+          key={prev.id}
           className="q-cover-fadeout"
           style={{ position: "absolute", inset: 0 }}
           onAnimationEnd={() => setPrev(null)}
@@ -612,6 +613,51 @@ function CrossfadeCover({ album, size = 60 }: CoverProps) {
         <Cover album={current} size={size} />
       </div>
     </div>
+  );
+}
+
+// Crossfading background-image layer — the div-based sibling of
+// CrossfadeCover, for surfaces that paint art as a backdrop rather than
+// an <img> (fullscreen player backdrop, mini player backdrop + thumb).
+// On url change the old layer fades out while the new fades in, reusing
+// the same 320 ms keyframes. `filter` lets each surface tune its blur;
+// `inset` lets blurred surfaces over-paint ("-10%") so the blur doesn't
+// vignette at the edges. A null url renders nothing — whatever solid
+// base sits underneath shows through.
+function CrossfadeBackdrop({ url, filter, inset = 0 }: {
+  url: string | null;
+  filter?: string;
+  inset?: number | string;
+}) {
+  const [current, setCurrent] = useState(url);
+  const [prev, setPrev] = useState<string | null>(null);
+  useEffect(() => {
+    if (url !== current) {
+      setPrev(current);
+      setCurrent(url);
+    }
+  }, [url, current]);
+  const layerStyle = (u: string): React.CSSProperties => ({
+    position: "absolute", inset,
+    backgroundImage: `url("${u}")`,
+    backgroundSize: "cover", backgroundPosition: "center",
+    filter,
+  });
+  return (
+    <>
+      {/* key on BOTH layers: without it, a second rapid track change
+          reuses the old fadeout div — its animation doesn't restart and
+          the stale onAnimationEnd clears the wrong layer early. */}
+      {prev && (
+        <div
+          key={prev}
+          className="q-cover-fadeout"
+          style={layerStyle(prev)}
+          onAnimationEnd={() => setPrev(null)}
+        />
+      )}
+      {current && <div key={current} className="q-cover-fadein" style={layerStyle(current)} />}
+    </>
   );
 }
 
@@ -3479,13 +3525,14 @@ const WaveformScrubBar = memo(function WaveformScrubBar({
   // rect set be styled two ways).
   const bars = useMemo(() => {
     if (!peaks || peaks.length === 0) return null;
-    // Phase 28 — Per-track peak normalize + gamma shaping.
-    //   1. Find max peak. Tracks vary by 30+ dB so linear-normalize is
-    //      essential to make a quiet ambient piece fill the viewport.
-    //   2. Apply a gamma 0.6 curve. Modern masters cluster their peaks
-    //      near full-scale; raw linear bars then look like a brick. The
-    //      gamma curve visually amplifies the *deviations* below max
-    //      without distorting the overall envelope shape.
+    // Per-track normalize + gamma shaping. The bins arrive as RMS values
+    // (see compute_waveform_peaks — v2 cache), so the dynamics are real:
+    //   1. Normalize against the track's max RMS so quiet masters still
+    //      fill the viewport (tracks vary by 30+ dB).
+    //   2. Gamma 0.75 gives the envelope a touch of visual contrast lift
+    //      without flattening it. (The old 0.6 was compensating for
+    //      max-abs bins that were already bricked — with RMS data a curve
+    //      that aggressive would crush the dynamics we just recovered.)
     //   3. Minimum bar height of 0.6 px is small enough that silent gaps
     //      genuinely look like silence rather than a forced 2 px floor.
     let maxPeak = 0;
@@ -3497,7 +3544,7 @@ const WaveformScrubBar = memo(function WaveformScrubBar({
     const out: React.ReactNode[] = [];
     for (let i = 0; i < n; i++) {
       const norm = Math.min(1, peaks[i] * scale);
-      const visual = Math.pow(norm, 0.6);
+      const visual = Math.pow(norm, 0.7);
       const h = Math.max(0.6, visual * 100);
       out.push(
         <rect
@@ -3648,6 +3695,11 @@ interface NowPlayingBarProps {
   /// Sleep timer state. Indicator chip renders only when active.
   sleepTimer: SleepTimer;
   onCancelSleepTimer: () => void;
+  /// Navigation from the meta block — clicking the artist name opens the
+  /// artist detail, clicking the album name opens the album detail.
+  /// Mirrors the clickable cells in TrackList.
+  onOpenArtist?: (name: string) => void;
+  onOpenAlbum?: (libId: number) => void;
 }
 
 function NowPlayingBar({
@@ -3661,7 +3713,15 @@ function NowPlayingBar({
   scrubStyle, waveformPeaks,
   currentTrackId, isFavorite, onToggleFavorite,
   sleepTimer, onCancelSleepTimer,
+  onOpenArtist, onOpenAlbum,
 }: NowPlayingBarProps) {
+  // Remaining ↔ total duration toggle on the right time label. Session-
+  // scoped on purpose — players that persist this confuse more than help.
+  const [showTotal, setShowTotal] = useState(false);
+  // Meta links only navigate when a real library album is shown — the
+  // empty-library placeholder (id "none") would render a dead "View No
+  // track" link with a pointer cursor otherwise.
+  const navigable = currentAlbum.id !== "none";
   // Subscribe to the shared playback-state store and interpolate position
   // locally via requestAnimationFrame. The store fans out from a single
   // Tauri listener (saves N − 1 deserializations per emit), and the
@@ -3694,7 +3754,7 @@ function NowPlayingBar({
     // (4 Hz tick during playback + every rAF step from the interpolator).
     // Static layout / borders / gradient live in CSS (.q-npb*) so each
     // render no longer allocates a forest of style objects.
-    <div className="q-npb">
+    <div className="q-npb" data-scrub={scrubStyle}>
       {/* Left: art + meta */}
       <div className="q-npb-left">
         <div onClick={onOpenFullscreen} title="Fullscreen (F)" className="q-npb-art">
@@ -3705,9 +3765,28 @@ function NowPlayingBar({
             {current.title.split(" — ")[1] ?? current.title}
           </div>
           <div className="q-npb-subtitle">
-            {currentAlbum.artist}
+            {/* Artist + album are navigation links, same affordance as the
+                clickable cells in TrackList. Guarded on the handlers so the
+                bar degrades to plain text if a host doesn't wire them. */}
+            <span
+              className={onOpenArtist && navigable ? "q-row-link" : undefined}
+              style={onOpenArtist && navigable ? { cursor: "pointer" } : undefined}
+              title={onOpenArtist && navigable ? `View ${currentAlbum.artist}` : undefined}
+              onClick={onOpenArtist && navigable ? () => onOpenArtist(currentAlbum.artist) : undefined}
+            >{currentAlbum.artist}</span>
             <span style={{ margin: "0 6px", color: "var(--text-faint)" }}>·</span>
-            <span style={{ fontStyle: "italic", fontFamily: "var(--serif)" }}>{currentAlbum.title.split(",")[0]}</span>
+            <span
+              className={onOpenAlbum && navigable ? "q-row-link" : undefined}
+              style={{
+                fontStyle: "italic", fontFamily: "var(--serif)",
+                ...(onOpenAlbum && navigable ? { cursor: "pointer" } : null),
+              }}
+              title={onOpenAlbum && navigable ? `View ${currentAlbum.title.split(",")[0]}` : undefined}
+              onClick={onOpenAlbum && navigable ? () => {
+                const libId = parseInt(currentAlbum.id.replace("lib-", ""), 10);
+                if (!isNaN(libId)) onOpenAlbum(libId);
+              } : undefined}
+            >{currentAlbum.title.split(",")[0]}</span>
           </div>
           <div className="q-npb-fav-row">
             <button
@@ -3786,7 +3865,7 @@ function NowPlayingBar({
               progress={progress}
               totalSec={totalSec}
               onSeekSecs={onSeek}
-              height={32}
+              height={48}
             />
           ) : (
             <FlatScrubBar
@@ -3795,7 +3874,12 @@ function NowPlayingBar({
               onSeekSecs={onSeek}
             />
           )}
-          <span className="mono q-npb-time">−{fmt(remaining)}</span>
+          <span
+            className="mono q-npb-time"
+            style={{ cursor: "pointer" }}
+            title={showTotal ? "Show remaining time" : "Show total duration"}
+            onClick={() => setShowTotal((s) => !s)}
+          >{showTotal ? fmt(Math.floor(totalSec)) : `−${fmt(remaining)}`}</span>
         </div>
       </div>
 
@@ -4080,6 +4164,8 @@ function FullscreenPlayer({
   // automatically resets when the user closes the player. The lyrics
   // themselves are fetched inside LyricsPanel.
   const [lyricsOpen, setLyricsOpen] = useState(false);
+  // Remaining ↔ total duration toggle, same affordance as the NPB label.
+  const [showTotal, setShowTotal] = useState(false);
 
   // Escape closes the overlay.
   useEffect(() => {
@@ -4128,16 +4214,8 @@ function FullscreenPlayer({
         "--accent-dim": fsAccentDim,
       } as React.CSSProperties}
     >
-      {/* ── Blurred art backdrop (always dark) ── */}
-      {artUrl && (
-        <div style={{
-          position: "absolute", inset: "-10%",
-          backgroundImage: `url("${artUrl}")`,
-          backgroundSize: "cover", backgroundPosition: "center",
-          backgroundColor: "#0a0a0c",
-          filter: "blur(60px) brightness(0.22) saturate(1.5)",
-        }} />
-      )}
+      {/* ── Blurred art backdrop (always dark) — crossfades on track change ── */}
+      <CrossfadeBackdrop url={artUrl} inset="-10%" filter="blur(60px) brightness(0.22) saturate(1.5)" />
       {/* Extra vignette for contrast */}
       <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.38)" }} />
 
@@ -4185,7 +4263,7 @@ function FullscreenPlayer({
               boxShadow: "0 40px 100px -24px rgba(0,0,0,0.9), 0 12px 30px -10px rgba(0,0,0,0.7)",
               borderRadius: 6, overflow: "hidden",
             }}>
-              <Cover album={currentAlbum} size="100%" />
+              <CrossfadeCover album={currentAlbum} size="100%" />
             </div>
           </div>
 
@@ -4299,7 +4377,12 @@ function FullscreenPlayer({
               )}
               <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
                 <span className="mono" style={{ fontSize: 10, color: "rgba(255,255,255,0.35)" }}>{fmtTime(elapsed)}</span>
-                <span className="mono" style={{ fontSize: 10, color: "rgba(255,255,255,0.35)" }}>−{fmtTime(remaining)}</span>
+                <span
+                  className="mono"
+                  style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", cursor: "pointer" }}
+                  title={showTotal ? "Show remaining time" : "Show total duration"}
+                  onClick={() => setShowTotal((s) => !s)}
+                >{showTotal ? fmtTime(Math.floor(totalSec)) : `−${fmtTime(remaining)}`}</span>
               </div>
             </div>
 
@@ -4622,7 +4705,14 @@ function VolumeKnob({ value, onChange }: VolumeKnobProps) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-      <div style={{ position: "relative", width: 56, height: 56 }}>
+      {/* Wheel handler lives on the OUTER 56px wrapper (not the inner grab
+          circle) so scrolling anywhere over the knob — arc, ticks, dial —
+          adjusts volume. Single handler; an inner copy would double-fire
+          via bubbling. */}
+      <div
+        style={{ position: "relative", width: 56, height: 56 }}
+        onWheel={(e) => { setV(Math.max(0, Math.min(1, v - e.deltaY * 0.0008))); }}
+      >
         <svg width="56" height="56" viewBox="0 0 56 56" style={{ position: "absolute", inset: 0, overflow: "visible" }}>
           <path d={trackD} fill="none" stroke="var(--line-strong)" strokeWidth="1.5" strokeLinecap="round" />
           {v > 0.005 && (
@@ -4636,7 +4726,6 @@ function VolumeKnob({ value, onChange }: VolumeKnobProps) {
         </svg>
 
         <div ref={ref} onMouseDown={onDown}
-          onWheel={(e) => { e.preventDefault(); setV(Math.max(0, Math.min(1, v - e.deltaY * 0.0008))); }}
           style={{
             position: "absolute", top: 10, left: 10, width: 36, height: 36,
             borderRadius: "50%",
@@ -4802,11 +4891,37 @@ export default function App() {
     const insertAt = insertBefore > from ? insertBefore - 1 : insertBefore;
     newQ.splice(insertAt, 0, moved);
     setQueue(newQ);
+    // Reorder remaps every index — the shuffle bag's and play history's
+    // stored indices now point at different tracks. Clear both; the bag
+    // refills on next draw, history rebuilds as playback continues.
+    shuffleBagRef.current = [];
+    playHistoryRef.current = [];
     if (current) {
       const newIdx = newQ.indexOf(current);
-      if (newIdx >= 0) setQueueIndex(newIdx);
+      if (newIdx >= 0) {
+        setQueueIndex(newIdx);
+        queueIndexRef.current = newIdx;
+        // pendingNextIdxRef is ALSO an index into the old order, and the
+        // engine still holds the previously queued path. Re-sync both so
+        // the reorder actually takes effect at the next track boundary
+        // (the whole point of dragging something to the top of Up Next).
+        const next = computeNextIndex(newIdx, newQ.length);
+        pendingNextIdxRef.current = next;
+        if (next !== null) {
+          invoke("queue_next_track", { path: newQ[next].path }).catch(console.error);
+        }
+      }
     }
   }, [setQueue, setQueueIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // OS window title follows playback so the taskbar hover / Alt-Tab list
+  // shows what's playing. The custom in-app TitleBar is unaffected (it
+  // draws its own chrome); this only touches the native window text.
+  useEffect(() => {
+    const t = queue[queueIndex];
+    const title = t ? `${t.title} — ${t.artist} · Quartz` : "Quartz";
+    getCurrentWindow().setTitle(title).catch(() => {});
+  }, [queue, queueIndex]);
 
   // Open (or focus) the always-on-top miniplayer window.
   const openMiniPlayer = useCallback(async () => {
@@ -4821,7 +4936,9 @@ export default function App() {
       const win = new WebviewWindow("miniplayer", {
         url: "/?mini=1",
         title: "Quartz Mini",
-        width: 360,
+        // 420, not the original 360 — the prev/next transport buttons
+        // need ~56px so the title/artist column doesn't get crushed.
+        width: 420,
         height: 96,
         resizable: false,
         decorations: false,
@@ -4978,6 +5095,18 @@ export default function App() {
   // Stores the queue index sent to the engine via queue_next_track.
   // When `track-changed` fires the engine has already moved to that index.
   const pendingNextIdxRef = useRef<number | null>(null);
+  // Played-index history for the prev button. With shuffle on,
+  // queueIndex − 1 is some unrelated track — users expect prev to return
+  // to what they actually just heard. Every forward advance pushes the
+  // index it's leaving; prev pops. Cleared whenever the queue is replaced
+  // or reordered (stored indices would point at different tracks).
+  const playHistoryRef = useRef<number[]>([]);
+  const pushPlayHistory = (idx: number) => {
+    const h = playHistoryRef.current;
+    if (idx < 0 || h[h.length - 1] === idx) return; // no dup of stack top
+    h.push(idx);
+    if (h.length > 200) h.shift(); // bound memory on long sessions
+  };
   useEffect(() => { queueRef.current = queue; }, [queue]);
   useEffect(() => { queueIndexRef.current = queueIndex; }, [queueIndex]);
 
@@ -5196,19 +5325,12 @@ export default function App() {
         invoke("play_file", { path: q[curIdx].path }).catch(console.error);
         return;
       }
-      const repeat = repeatModeRef.current === "one" ? "off" : repeatModeRef.current;
-      let nextIdx: number | null;
-      if (shuffleRef.current && q.length > 1) {
-        let r: number;
-        do { r = Math.floor(Math.random() * q.length); } while (r === curIdx);
-        nextIdx = r;
-      } else {
-        const i = curIdx + 1;
-        if (i < q.length) nextIdx = i;
-        else if (repeat === "all") nextIdx = 0;
-        else nextIdx = null;
-      }
+      // Same picker as every other advance path (shuffle bag included).
+      // ignoreRepeatOne on the error path: replaying a broken track on
+      // repeat-one would loop the failure forever.
+      const nextIdx = computeNextIndex(curIdx, q.length, !honorRepeatOne);
       if (nextIdx === null) return;
+      pushPlayHistory(curIdx);
       queueIndexRef.current = nextIdx;
       setQueueIndex(nextIdx);
       setCurrentLibAlbumId(q[nextIdx].album_id);
@@ -5232,10 +5354,25 @@ export default function App() {
     const unlistenEnded = listen("track-ended", () => advanceQueue(true));
     // Gapless: engine crossed a track boundary seamlessly — advance the queue
     // index and send the next-next track without calling play_file.
-    const unlistenChanged = listen("track-changed", () => {
+    const unlistenChanged = listen<string>("track-changed", (e) => {
       const q = queueRef.current;
-      const newIdx = pendingNextIdxRef.current;
-      if (newIdx === null || q.length === 0) return;
+      if (q.length === 0) return;
+      // Resolve the new index from the path the engine ACTUALLY switched
+      // to (the event payload). pendingNextIdxRef can be stale — a queue
+      // reorder remaps indices, and a shuffle/repeat toggle mid-crossfade
+      // re-points it while the in-flight fade still lands on the old
+      // target. The path is ground truth; pending is only a fallback for
+      // exotic cases (e.g. duplicate paths resolve to the first match).
+      let newIdx = typeof e.payload === "string" && e.payload
+        ? q.findIndex((t) => t.path === e.payload)
+        : -1;
+      if (newIdx < 0) newIdx = pendingNextIdxRef.current ?? -1;
+      if (newIdx < 0 || newIdx >= q.length) return;
+      pushPlayHistory(queueIndexRef.current);
+      // Sync the ref immediately (not just via the queueIndex effect) so a
+      // second gapless boundary arriving before the next render still reads
+      // the right "previous" index.
+      queueIndexRef.current = newIdx;
       setQueueIndex(newIdx);
       // Cross-album gapless transitions need the album state to follow too.
       setCurrentLibAlbumId(q[newIdx].album_id);
@@ -5479,6 +5616,18 @@ export default function App() {
         case "F":
           setFullscreenOpen((o) => !o);
           break;
+        case "s":
+        case "S":
+          // Toggle via the ref (handler registered once) — the re-sync
+          // effect on [shuffle] takes care of the engine's pre-queued next.
+          setShuffle(!shuffleRef.current);
+          break;
+        case "r":
+        case "R":
+          // Functional update: cycleRepeat closes over render-scoped state,
+          // which is stale inside this once-registered listener.
+          setRepeatMode((prev) => prev === "off" ? "all" : prev === "all" ? "one" : "off");
+          break;
       }
     };
 
@@ -5592,6 +5741,8 @@ export default function App() {
       setLibArtists([]);
       setQueue([]);
       setQueueIndex(0);
+      shuffleBagRef.current = [];
+      playHistoryRef.current = [];
       setCurrentLibAlbumId(null);
       setRecentAlbumIds([]);
       setSavedSession({ track: null, position: 0, duration: 0 });
@@ -5603,18 +5754,38 @@ export default function App() {
     }
   };
 
-  const playTrackAt = useCallback(async (tracks: LibraryTrack[], index: number) => {
+  const playTrackAt = useCallback(async (tracks: LibraryTrack[], index: number, opts?: { pushHistory?: boolean }) => {
     if (index < 0 || index >= tracks.length) return;
     try {
       await invoke("play_file", { path: tracks[index].path });
+      // Record where we came from so prev can return there — suppressed
+      // when prev itself is the caller (going back consumes history).
+      if (opts?.pushHistory !== false) pushPlayHistory(queueIndexRef.current);
       setQueueIndex(index);
+      // Sync the ref immediately — a second manual skip arriving before
+      // the next render must read THIS index, not the stale one (the
+      // advance listeners already do the same).
+      queueIndexRef.current = index;
       // Update displayed album when manual prev/next or queue clicks cross
       // an album boundary. Without this, NPB / FullscreenPlayer / mini player
       // keep showing the OLD album.
       setCurrentLibAlbumId(tracks[index].album_id);
       pushRecent(tracks[index].album_id);
       // Pre-queue next track for gapless playback.
+      const oldPending = pendingNextIdxRef.current;
       const nextIdx = computeNextIndex(index, tracks.length);
+      // If we're abandoning an unplayed bag draw (e.g. prev, or a queue-
+      // panel click while something else was pre-queued), return it to the
+      // bag so the shuffle pass still covers every track exactly once.
+      if (
+        shuffleRef.current && oldPending !== null &&
+        oldPending !== nextIdx && oldPending !== index &&
+        oldPending >= 0 && oldPending < tracks.length &&
+        !shuffleBagRef.current.includes(oldPending)
+      ) {
+        const bag = shuffleBagRef.current;
+        bag.splice(Math.floor(Math.random() * (bag.length + 1)), 0, oldPending);
+      }
       pendingNextIdxRef.current = nextIdx;
       if (nextIdx !== null) {
         invoke("queue_next_track", { path: tracks[nextIdx].path }).catch(console.error);
@@ -5625,6 +5796,12 @@ export default function App() {
   }, [setQueueIndex, setCurrentLibAlbumId, pushRecent]); // computeNextIndex reads stable refs — no dep needed
 
   const openArtist = useCallback(async (name: string) => {
+    // Clear the views that outrank artist detail in the render ladder
+    // (settings, playlist) — otherwise navigating here from e.g. the
+    // NowPlayingBar's artist link while Settings is open is a dead click.
+    setSettingsOpen(false);
+    setDetailPlaylistId(null);
+    setDetailPlaylistTracks([]);
     setDetailArtistName(name);
     try {
       const albums = await invoke<LibraryAlbum[]>("list_albums_by_artist", { artist: name });
@@ -5641,8 +5818,10 @@ export default function App() {
 
   const openAlbum = useCallback(async (libId: number) => {
     // Clear other detail views — the conditional ladder in the main render
-    // checks artist + playlist before album, so leaving either set would
-    // keep the wrong panel visible (this was the artist→album navigation bug).
+    // checks settings + artist + playlist before album, so leaving any set
+    // would keep the wrong panel visible (this was the artist→album
+    // navigation bug; settings joined the list for the NPB album link).
+    setSettingsOpen(false);
     setDetailArtistName(null);
     setArtistDetailAlbums([]);
     setDetailPlaylistId(null);
@@ -5667,6 +5846,10 @@ export default function App() {
     pushRecent(t.album_id);
     invoke("play_file", { path: t.path }).catch(console.error);
     invoke("log_play", { trackId: t.id }).catch(() => {});
+    // New queue → fresh shuffle pass + fresh history (old indices are
+    // meaningless against the replaced queue).
+    playHistoryRef.current = [];
+    if (shuffleRef.current) refillShuffleBag(index, tracks.length);
     // Pre-queue next for gapless auto-advance — computeNextIndex (rather
     // than a bare index+1) keeps the pre-queued track consistent with the
     // active shuffle / repeat mode, matching what track-changed will pick.
@@ -5688,6 +5871,9 @@ export default function App() {
       pushRecent(libId);
       await invoke("play_file", { path: tracks[0].path });
       invoke("log_play", { trackId: tracks[0].id }).catch(() => {});
+      // New queue → fresh shuffle pass + fresh history.
+      playHistoryRef.current = [];
+      if (shuffleRef.current) refillShuffleBag(0, tracks.length);
       // Pre-queue next for gapless auto-advance (shuffle/repeat-aware).
       const nextIdx = computeNextIndex(0, tracks.length);
       pendingNextIdxRef.current = nextIdx;
@@ -5785,8 +5971,13 @@ export default function App() {
     setQueueIndex(start);
     invoke("play_file", { path: tracks[start].path }).catch(console.error);
     invoke("log_play", { trackId: tracks[start].id }).catch(() => {});
-    // Pre-queue next for gapless.
-    const nextIdx = start + 1 < tracks.length ? start + 1 : null;
+    // New queue → fresh shuffle pass + fresh history; pre-queue via the
+    // shared picker so the global shuffle toggle applies here too
+    // (doShuffle pre-shuffles the ARRAY — independent of, and composable
+    // with, the toggle).
+    playHistoryRef.current = [];
+    if (shuffleRef.current) refillShuffleBag(start, tracks.length);
+    const nextIdx = computeNextIndex(start, tracks.length);
     pendingNextIdxRef.current = nextIdx;
     if (nextIdx !== null) {
       invoke("queue_next_track", { path: tracks[nextIdx].path }).catch(console.error);
@@ -5920,8 +6111,12 @@ export default function App() {
     pushRecent(detailAlbumId);
     invoke("play_file", { path: tracks[start].path }).catch(console.error);
     invoke("log_play", { trackId: tracks[start].id }).catch(() => {});
-    // Pre-queue next for gapless (tracks array is local, already shuffled if needed).
-    const nextIdx = start + 1 < tracks.length ? start + 1 : null;
+    // New queue → fresh shuffle pass + fresh history; shared picker keeps
+    // the global shuffle toggle honored on top of the (optionally
+    // pre-shuffled) array.
+    playHistoryRef.current = [];
+    if (shuffleRef.current) refillShuffleBag(start, tracks.length);
+    const nextIdx = computeNextIndex(start, tracks.length);
     pendingNextIdxRef.current = nextIdx;
     if (nextIdx !== null) {
       invoke("queue_next_track", { path: tracks[nextIdx].path }).catch(console.error);
@@ -5932,15 +6127,48 @@ export default function App() {
     playTrackAt(queueRef.current, index);
   }, [playTrackAt]);
 
+  // ── Shuffle bag ─────────────────────────────────────────────────
+  // Shuffle plays a true PERMUTATION: every queue index exactly once per
+  // pass, then a fresh permutation. The old implementation drew an
+  // independent random index per advance (excluding only the current
+  // track) — on a 15-track album that repeats tracks within a few skips
+  // and can starve others for a long time, which is what "shuffle isn't
+  // behaving" complaints are invariably about.
+  //
+  // The bag holds the upcoming indices of the current pass; draws pop
+  // from the end. Refilled (Fisher-Yates, excluding the track we're
+  // leaving so a new pass never opens with an immediate repeat):
+  //   - eagerly, whenever a play action REPLACES the queue
+  //   - lazily, when a draw finds it empty (pass complete, or the bag
+  //     was invalidated by a queue reorder)
+  // Every consumer — manual next, auto-advance, gapless pre-queue —
+  // draws from this one bag, so they can't disagree about what's next.
+  const shuffleBagRef = useRef<number[]>([]);
+  const refillShuffleBag = (excludeIdx: number, queueLen: number) => {
+    const bag: number[] = [];
+    for (let i = 0; i < queueLen; i++) if (i !== excludeIdx) bag.push(i);
+    for (let i = bag.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [bag[i], bag[j]] = [bag[j], bag[i]];
+    }
+    shuffleBagRef.current = bag;
+  };
+  const drawShuffleIdx = (fromIdx: number, queueLen: number): number | null => {
+    // Drop entries invalidated by queue shrinkage (reorder clears the
+    // bag outright; this guards the remove-track case).
+    shuffleBagRef.current = shuffleBagRef.current.filter((i) => i < queueLen);
+    if (shuffleBagRef.current.length === 0) {
+      refillShuffleBag(fromIdx, queueLen);
+      if (shuffleBagRef.current.length === 0) return null; // 1-track queue
+    }
+    return shuffleBagRef.current.pop() ?? null;
+  };
+
   const pickNextIndex = (): number | null => {
     const q = queueRef.current;
     if (q.length === 0) return null;
     if (shuffleRef.current && q.length > 1) {
-      let r: number;
-      do {
-        r = Math.floor(Math.random() * q.length);
-      } while (r === queueIndexRef.current);
-      return r;
+      return drawShuffleIdx(queueIndexRef.current, q.length);
     }
     const i = queueIndexRef.current + 1;
     if (i < q.length) return i;
@@ -5950,13 +6178,14 @@ export default function App() {
 
   // Like pickNextIndex but takes an explicit fromIdx instead of reading the
   // ref — needed for gapless where the ref hasn't updated yet.
-  const computeNextIndex = (fromIdx: number, queueLen: number): number | null => {
+  // `ignoreRepeatOne` lets the playback-error skip path advance past a
+  // broken track even in repeat-one mode (replaying it would loop the
+  // failure forever).
+  const computeNextIndex = (fromIdx: number, queueLen: number, ignoreRepeatOne = false): number | null => {
     if (queueLen === 0) return null;
-    if (repeatModeRef.current === "one") return fromIdx;
+    if (!ignoreRepeatOne && repeatModeRef.current === "one") return fromIdx;
     if (shuffleRef.current && queueLen > 1) {
-      let r: number;
-      do { r = Math.floor(Math.random() * queueLen); } while (r === fromIdx);
-      return r;
+      return drawShuffleIdx(fromIdx, queueLen);
     }
     const i = fromIdx + 1;
     if (i < queueLen) return i;
@@ -5964,9 +6193,45 @@ export default function App() {
     return null;
   };
 
+  // Toggling shuffle or repeat mid-track must re-sync the engine's
+  // pre-queued next track — otherwise the old "next" (picked under the
+  // previous mode) still plays and the toggle appears to take effect one
+  // track late. Shuffle-on also starts a fresh permutation from here.
+  const modeInitRef = useRef(false);
+  useEffect(() => {
+    if (!modeInitRef.current) { modeInitRef.current = true; return; }
+    const q = queueRef.current;
+    if (q.length === 0) return;
+    if (shuffle) refillShuffleBag(queueIndexRef.current, q.length);
+    const next = computeNextIndex(queueIndexRef.current, q.length);
+    pendingNextIdxRef.current = next;
+    if (next !== null) {
+      invoke("queue_next_track", { path: q[next].path }).catch(console.error);
+    }
+    // next === null (e.g. repeat turned off on the last track): the engine
+    // may still hold a stale queued path — there's no "unqueue" command.
+    // Acceptable edge: the stale track plays and the UI follows it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shuffle, repeatMode]);
+
   const next = () => {
+    const q = queueRef.current;
+    const pending = pendingNextIdxRef.current;
+    // Shuffle: the upcoming track was already drawn from the bag and
+    // pre-queued in the engine — play THAT. Drawing a fresh index here
+    // would orphan the drawn entry (it never returns to the bag), so each
+    // manual skip would silently drop a track from the current pass.
+    // Skipped when pending is the current index (repeat-one stores
+    // fromIdx, which isn't a bag draw).
+    if (
+      shuffleRef.current && pending !== null &&
+      pending !== queueIndexRef.current && pending >= 0 && pending < q.length
+    ) {
+      playTrackAt(q, pending);
+      return;
+    }
     const i = pickNextIndex();
-    if (i !== null) playTrackAt(queueRef.current, i);
+    if (i !== null) playTrackAt(q, i);
   };
 
   const prev = () => {
@@ -5975,8 +6240,21 @@ export default function App() {
       invoke("seek_to", { secs: 0 }).catch(console.error);
       return;
     }
+    // Prefer the actually-played history — with shuffle on, queueIndex − 1
+    // is some unrelated track, not the one the user just heard. Entries
+    // can be stale after queue edits (guarded), and going back must NOT
+    // re-push the current index, or prev would ping-pong between two tracks.
+    const q = queueRef.current;
+    const h = playHistoryRef.current;
+    while (h.length > 0) {
+      const idx = h.pop()!;
+      if (idx >= 0 && idx < q.length && idx !== queueIndexRef.current) {
+        playTrackAt(q, idx, { pushHistory: false });
+        return;
+      }
+    }
     const i = queueIndexRef.current - 1;
-    if (i >= 0) playTrackAt(queueRef.current, i);
+    if (i >= 0) playTrackAt(q, i, { pushHistory: false });
   };
 
   // Convert library albums into UI Album objects
@@ -6594,6 +6872,8 @@ export default function App() {
         onToggleFavorite={() => { if (currentTrackId != null) toggleFavorite(currentTrackId); }}
         sleepTimer={sleepTimer}
         onCancelSleepTimer={() => setSleepTimer({ kind: "off" })}
+        onOpenArtist={openArtist}
+        onOpenAlbum={openAlbum}
       />
       {/* EqPanel is lazy-loaded; the Suspense fallback renders nothing
           while the chunk fetches (~tens of ms on first open). The panel
@@ -8793,29 +9073,58 @@ export function MiniPlayerApp() {
     } catch { /* */ }
   };
 
+  // Ghost transport button (prev/next). Routed through the SAME
+  // "media-button" event the SMTC hardware keys use — the main window's
+  // listener owns the queue and shuffle/repeat logic, so the mini window
+  // never needs its own copy of the queue state.
+  const ghostBtn = (action: "prev" | "next", d: string, title: string) => (
+    <button
+      data-tauri-drag-region="false"
+      onClick={() => { void emit("media-button", action).catch(() => {}); }}
+      title={title}
+      style={{
+        flexShrink: 0, width: 24, height: 24, background: "transparent",
+        border: 0, color: "var(--text-dim)", cursor: "pointer",
+        display: "grid", placeItems: "center", padding: 0,
+      }}
+    >
+      <svg width="12" height="12" viewBox="0 0 16 16">
+        <path d={d} stroke="currentColor" fill="currentColor" strokeWidth="0.5" strokeLinejoin="round" />
+      </svg>
+    </button>
+  );
+
   return (
     <div
       data-tauri-drag-region
       style={{
         width: "100vw", height: "100vh", overflow: "hidden",
-        background: "var(--bg-elev)",
+        position: "relative",
+        // Solid base so the window is opaque before art loads — same
+        // lesson as the FullscreenPlayer bleed-through fix.
+        background: "#0a0a0c",
         borderTop: "2px solid var(--accent)",
         display: "flex", flexDirection: "column",
         fontFamily: "var(--sans)", color: "var(--text)",
         userSelect: "none", WebkitUserSelect: "none",
       }}
     >
-      {/* Main row */}
-      <div data-tauri-drag-region style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, padding: "0 8px", minHeight: 0 }}>
+      {/* Blurred-art backdrop + vignette — FullscreenPlayer at mini zoom.
+          Absolute layers; the flex rows below carry zIndex 1 so they
+          paint above. Blur is tighter than fullscreen's 60px — at 96px
+          tall, 60px of blur washes to a flat color. */}
+      <CrossfadeBackdrop url={artUrl} inset="-12%" filter="blur(32px) brightness(0.30) saturate(1.4)" />
+      <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.32)" }} />
 
-        {/* Album art thumbnail */}
-        <div data-tauri-drag-region="false" style={{ flexShrink: 0, width: 48, height: 48, borderRadius: 2, overflow: "hidden", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
-          {artUrl
-            ? <img src={artUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            : <div style={{ width: "100%", height: "100%", background: "var(--panel)", display: "grid", placeItems: "center" }}>
-                <LogoMark kind="prism" size={14} />
-              </div>
-          }
+      {/* Main row */}
+      <div data-tauri-drag-region style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, padding: "0 8px", minHeight: 0, position: "relative", zIndex: 1 }}>
+
+        {/* Album art thumbnail — crossfades on track change */}
+        <div data-tauri-drag-region="false" style={{ flexShrink: 0, width: 48, height: 48, borderRadius: 2, overflow: "hidden", boxShadow: "0 2px 8px rgba(0,0,0,0.4)", position: "relative", background: "var(--panel)" }}>
+          <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center" }}>
+            <LogoMark kind="prism" size={14} />
+          </div>
+          <CrossfadeBackdrop url={artUrl} />
         </div>
 
         {/* Title + artist */}
@@ -8824,7 +9133,8 @@ export function MiniPlayerApp() {
           <div style={{ fontSize: 10, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2 }}>{artist}</div>
         </div>
 
-        {/* Play / pause */}
+        {/* Transport: prev / play / next */}
+        {ghostBtn("prev", "M3 4 V12 M14 3 L7 8 L14 13 Z", "Previous")}
         <button
           data-tauri-drag-region="false"
           onClick={togglePlay}
@@ -8835,6 +9145,7 @@ export function MiniPlayerApp() {
             : <svg width="10" height="10" viewBox="0 0 14 14"><path d="M4 2 L12 7 L4 12 Z" fill="var(--bg)" /></svg>
           }
         </button>
+        {ghostBtn("next", "M13 4 V12 M2 3 L9 8 L2 13 Z", "Next")}
 
         {/* Mini spectrum */}
         <div data-tauri-drag-region style={{ flexShrink: 0, display: "flex", alignItems: "center" }}>
@@ -8852,7 +9163,7 @@ export function MiniPlayerApp() {
       {/* Scrubber */}
       <div
         data-tauri-drag-region="false"
-        style={{ height: 4, background: "var(--line-strong)", cursor: "pointer", flexShrink: 0 }}
+        style={{ height: 4, background: "var(--line-strong)", cursor: "pointer", flexShrink: 0, position: "relative", zIndex: 1 }}
         onMouseDown={(e) => {
           const el = e.currentTarget;
           const seek = (x: number) => {
@@ -8869,8 +9180,9 @@ export function MiniPlayerApp() {
         <div style={{ height: "100%", width: `${progress * 100}%`, background: "var(--accent)", borderRadius: 2 }} />
       </div>
 
-      {/* Format info bar */}
-      <div style={{ flexShrink: 0, height: 18, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 8px", background: "var(--panel)" }}>
+      {/* Format info bar — translucent so the art backdrop reads through,
+          matching the fullscreen player's bottom strip. */}
+      <div style={{ flexShrink: 0, height: 18, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 8px", background: "rgba(0,0,0,0.30)", position: "relative", zIndex: 1 }}>
         <span className="mono" style={{ fontSize: 8, color: "var(--text-faint)", letterSpacing: "0.12em" }}>
           {pbState.track ? `${liveBit}-BIT · ${liveRate} kHz` : "—"}
         </span>
