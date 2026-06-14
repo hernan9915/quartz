@@ -4891,11 +4891,10 @@ export default function App() {
     const insertAt = insertBefore > from ? insertBefore - 1 : insertBefore;
     newQ.splice(insertAt, 0, moved);
     setQueue(newQ);
-    // Reorder remaps every index — the shuffle bag's and play history's
-    // stored indices now point at different tracks. Clear both; the bag
-    // refills on next draw, history rebuilds as playback continues.
-    shuffleBagRef.current = [];
-    playHistoryRef.current = [];
+    queueRef.current = newQ;
+    // A manual reorder becomes the new source order — drop the saved
+    // pre-shuffle order so a later shuffle-off doesn't snap back past it.
+    shuffleSourceRef.current = null;
     if (current) {
       const newIdx = newQ.indexOf(current);
       if (newIdx >= 0) {
@@ -5095,18 +5094,6 @@ export default function App() {
   // Stores the queue index sent to the engine via queue_next_track.
   // When `track-changed` fires the engine has already moved to that index.
   const pendingNextIdxRef = useRef<number | null>(null);
-  // Played-index history for the prev button. With shuffle on,
-  // queueIndex − 1 is some unrelated track — users expect prev to return
-  // to what they actually just heard. Every forward advance pushes the
-  // index it's leaving; prev pops. Cleared whenever the queue is replaced
-  // or reordered (stored indices would point at different tracks).
-  const playHistoryRef = useRef<number[]>([]);
-  const pushPlayHistory = (idx: number) => {
-    const h = playHistoryRef.current;
-    if (idx < 0 || h[h.length - 1] === idx) return; // no dup of stack top
-    h.push(idx);
-    if (h.length > 200) h.shift(); // bound memory on long sessions
-  };
   useEffect(() => { queueRef.current = queue; }, [queue]);
   useEffect(() => { queueIndexRef.current = queueIndex; }, [queueIndex]);
 
@@ -5325,12 +5312,11 @@ export default function App() {
         invoke("play_file", { path: q[curIdx].path }).catch(console.error);
         return;
       }
-      // Same picker as every other advance path (shuffle bag included).
+      // Same sequential picker as every other advance path.
       // ignoreRepeatOne on the error path: replaying a broken track on
       // repeat-one would loop the failure forever.
       const nextIdx = computeNextIndex(curIdx, q.length, !honorRepeatOne);
       if (nextIdx === null) return;
-      pushPlayHistory(curIdx);
       queueIndexRef.current = nextIdx;
       setQueueIndex(nextIdx);
       setCurrentLibAlbumId(q[nextIdx].album_id);
@@ -5368,10 +5354,9 @@ export default function App() {
         : -1;
       if (newIdx < 0) newIdx = pendingNextIdxRef.current ?? -1;
       if (newIdx < 0 || newIdx >= q.length) return;
-      pushPlayHistory(queueIndexRef.current);
       // Sync the ref immediately (not just via the queueIndex effect) so a
       // second gapless boundary arriving before the next render still reads
-      // the right "previous" index.
+      // the right index.
       queueIndexRef.current = newIdx;
       setQueueIndex(newIdx);
       // Cross-album gapless transitions need the album state to follow too.
@@ -5741,8 +5726,7 @@ export default function App() {
       setLibArtists([]);
       setQueue([]);
       setQueueIndex(0);
-      shuffleBagRef.current = [];
-      playHistoryRef.current = [];
+      shuffleSourceRef.current = null;
       setCurrentLibAlbumId(null);
       setRecentAlbumIds([]);
       setSavedSession({ track: null, position: 0, duration: 0 });
@@ -5754,13 +5738,10 @@ export default function App() {
     }
   };
 
-  const playTrackAt = useCallback(async (tracks: LibraryTrack[], index: number, opts?: { pushHistory?: boolean }) => {
+  const playTrackAt = useCallback(async (tracks: LibraryTrack[], index: number) => {
     if (index < 0 || index >= tracks.length) return;
     try {
       await invoke("play_file", { path: tracks[index].path });
-      // Record where we came from so prev can return there — suppressed
-      // when prev itself is the caller (going back consumes history).
-      if (opts?.pushHistory !== false) pushPlayHistory(queueIndexRef.current);
       setQueueIndex(index);
       // Sync the ref immediately — a second manual skip arriving before
       // the next render must read THIS index, not the stale one (the
@@ -5771,21 +5752,9 @@ export default function App() {
       // keep showing the OLD album.
       setCurrentLibAlbumId(tracks[index].album_id);
       pushRecent(tracks[index].album_id);
-      // Pre-queue next track for gapless playback.
-      const oldPending = pendingNextIdxRef.current;
+      // Pre-queue next track for gapless playback (sequential — the queue
+      // is already shuffle-materialized if shuffle is on).
       const nextIdx = computeNextIndex(index, tracks.length);
-      // If we're abandoning an unplayed bag draw (e.g. prev, or a queue-
-      // panel click while something else was pre-queued), return it to the
-      // bag so the shuffle pass still covers every track exactly once.
-      if (
-        shuffleRef.current && oldPending !== null &&
-        oldPending !== nextIdx && oldPending !== index &&
-        oldPending >= 0 && oldPending < tracks.length &&
-        !shuffleBagRef.current.includes(oldPending)
-      ) {
-        const bag = shuffleBagRef.current;
-        bag.splice(Math.floor(Math.random() * (bag.length + 1)), 0, oldPending);
-      }
       pendingNextIdxRef.current = nextIdx;
       if (nextIdx !== null) {
         invoke("queue_next_track", { path: tracks[nextIdx].path }).catch(console.error);
@@ -5840,23 +5809,21 @@ export default function App() {
   const playTrackFromList = useCallback((tracks: LibraryTrack[], index: number) => {
     if (index < 0 || index >= tracks.length) return;
     const t = tracks[index];
+    // Materialize shuffle (if on) into the queue so Up Next shows the real
+    // order; the clicked track stays first, the rest is shuffled.
+    const q = buildPlayQueue(tracks, index);
     setCurrentLibAlbumId(t.album_id);
-    setQueue(tracks);
+    setQueue(q);
+    queueRef.current = q;
     setQueueIndex(index);
+    queueIndexRef.current = index;
     pushRecent(t.album_id);
     invoke("play_file", { path: t.path }).catch(console.error);
     invoke("log_play", { trackId: t.id }).catch(() => {});
-    // New queue → fresh shuffle pass + fresh history (old indices are
-    // meaningless against the replaced queue).
-    playHistoryRef.current = [];
-    if (shuffleRef.current) refillShuffleBag(index, tracks.length);
-    // Pre-queue next for gapless auto-advance — computeNextIndex (rather
-    // than a bare index+1) keeps the pre-queued track consistent with the
-    // active shuffle / repeat mode, matching what track-changed will pick.
-    const nextIdx = computeNextIndex(index, tracks.length);
+    const nextIdx = computeNextIndex(index, q.length);
     pendingNextIdxRef.current = nextIdx;
     if (nextIdx !== null) {
-      invoke("queue_next_track", { path: tracks[nextIdx].path }).catch(console.error);
+      invoke("queue_next_track", { path: q[nextIdx].path }).catch(console.error);
     }
   }, [setCurrentLibAlbumId, setQueue, setQueueIndex, pushRecent]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -5865,20 +5832,19 @@ export default function App() {
     try {
       const tracks = await invoke<LibraryTrack[]>("list_tracks", { albumId: libId });
       if (tracks.length === 0) return;
+      const q = buildPlayQueue(tracks, 0);
       setCurrentLibAlbumId(libId);
-      setQueue(tracks);
+      setQueue(q);
+      queueRef.current = q;
       setQueueIndex(0);
+      queueIndexRef.current = 0;
       pushRecent(libId);
-      await invoke("play_file", { path: tracks[0].path });
-      invoke("log_play", { trackId: tracks[0].id }).catch(() => {});
-      // New queue → fresh shuffle pass + fresh history.
-      playHistoryRef.current = [];
-      if (shuffleRef.current) refillShuffleBag(0, tracks.length);
-      // Pre-queue next for gapless auto-advance (shuffle/repeat-aware).
-      const nextIdx = computeNextIndex(0, tracks.length);
+      await invoke("play_file", { path: q[0].path });
+      invoke("log_play", { trackId: q[0].id }).catch(() => {});
+      const nextIdx = computeNextIndex(0, q.length);
       pendingNextIdxRef.current = nextIdx;
       if (nextIdx !== null) {
-        invoke("queue_next_track", { path: tracks[nextIdx].path }).catch(console.error);
+        invoke("queue_next_track", { path: q[nextIdx].path }).catch(console.error);
       }
     } catch (err) {
       console.error("[quartz] quickPlayAlbum failed:", err);
@@ -5964,23 +5930,23 @@ export default function App() {
 
   const playFromPlaylist = (startIndex: number, doShuffle = false) => {
     if (detailPlaylistTracks.length === 0) return;
-    const tracks = doShuffle ? shuffled(detailPlaylistTracks) : detailPlaylistTracks;
+    // doShuffle (Shuffle Play button) pre-shuffles the whole array and
+    // starts at 0; the global shuffle toggle then materializes on top via
+    // buildPlayQueue (harmless if already shuffled).
+    const base = doShuffle ? shuffled(detailPlaylistTracks) : detailPlaylistTracks;
     const start = doShuffle ? 0 : startIndex;
-    setCurrentLibAlbumId(tracks[start]?.album_id ?? null);
-    setQueue(tracks);
+    const q = buildPlayQueue(base, start);
+    setCurrentLibAlbumId(q[start]?.album_id ?? null);
+    setQueue(q);
+    queueRef.current = q;
     setQueueIndex(start);
-    invoke("play_file", { path: tracks[start].path }).catch(console.error);
-    invoke("log_play", { trackId: tracks[start].id }).catch(() => {});
-    // New queue → fresh shuffle pass + fresh history; pre-queue via the
-    // shared picker so the global shuffle toggle applies here too
-    // (doShuffle pre-shuffles the ARRAY — independent of, and composable
-    // with, the toggle).
-    playHistoryRef.current = [];
-    if (shuffleRef.current) refillShuffleBag(start, tracks.length);
-    const nextIdx = computeNextIndex(start, tracks.length);
+    queueIndexRef.current = start;
+    invoke("play_file", { path: q[start].path }).catch(console.error);
+    invoke("log_play", { trackId: q[start].id }).catch(() => {});
+    const nextIdx = computeNextIndex(start, q.length);
     pendingNextIdxRef.current = nextIdx;
     if (nextIdx !== null) {
-      invoke("queue_next_track", { path: tracks[nextIdx].path }).catch(console.error);
+      invoke("queue_next_track", { path: q[nextIdx].path }).catch(console.error);
     }
   };
 
@@ -6104,22 +6070,20 @@ export default function App() {
   const playFromDetail = (startIndex: number, doShuffle = false) => {
     if (detailTracks.length === 0 || detailAlbumId === null) return;
     setCurrentLibAlbumId(detailAlbumId);
-    const tracks = doShuffle ? shuffled(detailTracks) : detailTracks;
+    const base = doShuffle ? shuffled(detailTracks) : detailTracks;
     const start = doShuffle ? 0 : startIndex;
-    setQueue(tracks);
+    const q = buildPlayQueue(base, start);
+    setQueue(q);
+    queueRef.current = q;
     setQueueIndex(start);
+    queueIndexRef.current = start;
     pushRecent(detailAlbumId);
-    invoke("play_file", { path: tracks[start].path }).catch(console.error);
-    invoke("log_play", { trackId: tracks[start].id }).catch(() => {});
-    // New queue → fresh shuffle pass + fresh history; shared picker keeps
-    // the global shuffle toggle honored on top of the (optionally
-    // pre-shuffled) array.
-    playHistoryRef.current = [];
-    if (shuffleRef.current) refillShuffleBag(start, tracks.length);
-    const nextIdx = computeNextIndex(start, tracks.length);
+    invoke("play_file", { path: q[start].path }).catch(console.error);
+    invoke("log_play", { trackId: q[start].id }).catch(() => {});
+    const nextIdx = computeNextIndex(start, q.length);
     pendingNextIdxRef.current = nextIdx;
     if (nextIdx !== null) {
-      invoke("queue_next_track", { path: tracks[nextIdx].path }).catch(console.error);
+      invoke("queue_next_track", { path: q[nextIdx].path }).catch(console.error);
     }
   };
 
@@ -6127,134 +6091,118 @@ export default function App() {
     playTrackAt(queueRef.current, index);
   }, [playTrackAt]);
 
-  // ── Shuffle bag ─────────────────────────────────────────────────
-  // Shuffle plays a true PERMUTATION: every queue index exactly once per
-  // pass, then a fresh permutation. The old implementation drew an
-  // independent random index per advance (excluding only the current
-  // track) — on a 15-track album that repeats tracks within a few skips
-  // and can starve others for a long time, which is what "shuffle isn't
-  // behaving" complaints are invariably about.
+  // ── Shuffle (materialized) ──────────────────────────────────────
+  // Shuffle is MATERIALIZED into the queue array: when it's on, the
+  // upcoming tracks are physically shuffled, so the visible Up Next panel,
+  // drag-reorder, and prev/next all operate on the real play order — no
+  // hidden "what plays next" state. Advance is then plain sequential.
   //
-  // The bag holds the upcoming indices of the current pass; draws pop
-  // from the end. Refilled (Fisher-Yates, excluding the track we're
-  // leaving so a new pass never opens with an immediate repeat):
-  //   - eagerly, whenever a play action REPLACES the queue
-  //   - lazily, when a draw finds it empty (pass complete, or the bag
-  //     was invalidated by a queue reorder)
-  // Every consumer — manual next, auto-advance, gapless pre-queue —
-  // draws from this one bag, so they can't disagree about what's next.
-  const shuffleBagRef = useRef<number[]>([]);
-  const refillShuffleBag = (excludeIdx: number, queueLen: number) => {
-    const bag: number[] = [];
-    for (let i = 0; i < queueLen; i++) if (i !== excludeIdx) bag.push(i);
-    for (let i = bag.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [bag[i], bag[j]] = [bag[j], bag[i]];
+  // `shuffleSourceRef` holds the pre-shuffle (source) order while shuffle
+  // is on, so toggling it off restores album order from the current track.
+  const shuffleSourceRef = useRef<LibraryTrack[] | null>(null);
+  // Fisher-Yates on tracks[fromIdx+1 ..]; the played + current portion
+  // (0 ..= fromIdx) stays put so the current track keeps playing.
+  const shuffleUpcoming = (tracks: LibraryTrack[], fromIdx: number): LibraryTrack[] => {
+    const out = tracks.slice();
+    for (let i = out.length - 1; i > fromIdx + 1; i--) {
+      const j = fromIdx + 1 + Math.floor(Math.random() * (i - fromIdx));
+      [out[i], out[j]] = [out[j], out[i]];
     }
-    shuffleBagRef.current = bag;
+    return out;
   };
-  const drawShuffleIdx = (fromIdx: number, queueLen: number): number | null => {
-    // Drop entries invalidated by queue shrinkage (reorder clears the
-    // bag outright; this guards the remove-track case).
-    shuffleBagRef.current = shuffleBagRef.current.filter((i) => i < queueLen);
-    if (shuffleBagRef.current.length === 0) {
-      refillShuffleBag(fromIdx, queueLen);
-      if (shuffleBagRef.current.length === 0) return null; // 1-track queue
+  // Called by every play action that REPLACES the queue. Returns the array
+  // to actually install (upcoming-shuffled when shuffle is on) and records
+  // the source order for a later toggle-off restore.
+  const buildPlayQueue = (tracks: LibraryTrack[], start: number): LibraryTrack[] => {
+    if (shuffleRef.current && tracks.length > 1) {
+      shuffleSourceRef.current = tracks;
+      return shuffleUpcoming(tracks, start);
     }
-    return shuffleBagRef.current.pop() ?? null;
+    shuffleSourceRef.current = null;
+    return tracks;
   };
 
-  const pickNextIndex = (): number | null => {
-    const q = queueRef.current;
-    if (q.length === 0) return null;
-    if (shuffleRef.current && q.length > 1) {
-      return drawShuffleIdx(queueIndexRef.current, q.length);
-    }
-    const i = queueIndexRef.current + 1;
-    if (i < q.length) return i;
-    if (repeatModeRef.current === "all") return 0;
-    return null;
-  };
-
-  // Like pickNextIndex but takes an explicit fromIdx instead of reading the
-  // ref — needed for gapless where the ref hasn't updated yet.
+  // Next/prev are sequential over the (already shuffled-if-needed) queue.
   // `ignoreRepeatOne` lets the playback-error skip path advance past a
-  // broken track even in repeat-one mode (replaying it would loop the
-  // failure forever).
+  // broken track even in repeat-one mode (replaying it would loop forever).
   const computeNextIndex = (fromIdx: number, queueLen: number, ignoreRepeatOne = false): number | null => {
     if (queueLen === 0) return null;
     if (!ignoreRepeatOne && repeatModeRef.current === "one") return fromIdx;
-    if (shuffleRef.current && queueLen > 1) {
-      return drawShuffleIdx(fromIdx, queueLen);
-    }
     const i = fromIdx + 1;
     if (i < queueLen) return i;
     if (repeatModeRef.current === "all") return 0;
     return null;
   };
+  const pickNextIndex = (): number | null =>
+    computeNextIndex(queueIndexRef.current, queueRef.current.length);
 
-  // Toggling shuffle or repeat mid-track must re-sync the engine's
-  // pre-queued next track — otherwise the old "next" (picked under the
-  // previous mode) still plays and the toggle appears to take effect one
-  // track late. Shuffle-on also starts a fresh permutation from here.
-  const modeInitRef = useRef(false);
+  // Toggling shuffle reorders the live queue (materialize on / restore off);
+  // toggling repeat just re-syncs the engine's pre-queued next. Both re-point
+  // the engine's queued-next so the change takes effect at the very next
+  // boundary, not one track late.
+  //
+  // We compare against the PREVIOUS shuffle/repeat values (not a one-shot
+  // init flag) so the body acts only on a genuine user toggle. This also
+  // makes it inert on mount and on React StrictMode's dev double-invoke —
+  // a one-shot flag let the body run spuriously on remount and reshuffle
+  // the restored queue.
+  const prevShuffleRef = useRef(shuffle);
+  const prevRepeatRef = useRef(repeatMode);
   useEffect(() => {
-    if (!modeInitRef.current) { modeInitRef.current = true; return; }
+    const shuffleChanged = prevShuffleRef.current !== shuffle;
+    const repeatChanged = prevRepeatRef.current !== repeatMode;
+    prevShuffleRef.current = shuffle;
+    prevRepeatRef.current = repeatMode;
+    if (!shuffleChanged && !repeatChanged) return; // mount / StrictMode re-run
     const q = queueRef.current;
     if (q.length === 0) return;
-    if (shuffle) refillShuffleBag(queueIndexRef.current, q.length);
-    const next = computeNextIndex(queueIndexRef.current, q.length);
-    pendingNextIdxRef.current = next;
-    if (next !== null) {
-      invoke("queue_next_track", { path: q[next].path }).catch(console.error);
+    const curIdx = queueIndexRef.current;
+
+    // Reorder ONLY when shuffle itself flipped — a repeat-only change must
+    // not reshuffle the queue or clobber the saved source order.
+    if (shuffleChanged && shuffle) {
+      // Entering shuffle: remember source order, shuffle the upcoming.
+      shuffleSourceRef.current = q;
+      const shuffled = shuffleUpcoming(q, curIdx);
+      queueRef.current = shuffled;
+      setQueue(shuffled);
+    } else if (shuffleChanged && shuffleSourceRef.current) {
+      // Leaving shuffle: restore source order, relocate the current track.
+      const src = shuffleSourceRef.current;
+      shuffleSourceRef.current = null;
+      if (src.length === q.length) {
+        const cur = q[curIdx];
+        const newIdx = cur ? src.findIndex((t) => t.id === cur.id) : curIdx;
+        queueRef.current = src;
+        setQueue(src);
+        if (newIdx >= 0) { queueIndexRef.current = newIdx; setQueueIndex(newIdx); }
+      }
     }
-    // next === null (e.g. repeat turned off on the last track): the engine
-    // may still hold a stale queued path — there's no "unqueue" command.
-    // Acceptable edge: the stale track plays and the UI follows it.
+
+    // Re-sync the engine's pre-queued next to the (possibly reordered) order.
+    const nextIdx = computeNextIndex(queueIndexRef.current, queueRef.current.length);
+    pendingNextIdxRef.current = nextIdx;
+    if (nextIdx !== null) {
+      invoke("queue_next_track", { path: queueRef.current[nextIdx].path }).catch(console.error);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shuffle, repeatMode]);
 
   const next = () => {
-    const q = queueRef.current;
-    const pending = pendingNextIdxRef.current;
-    // Shuffle: the upcoming track was already drawn from the bag and
-    // pre-queued in the engine — play THAT. Drawing a fresh index here
-    // would orphan the drawn entry (it never returns to the bag), so each
-    // manual skip would silently drop a track from the current pass.
-    // Skipped when pending is the current index (repeat-one stores
-    // fromIdx, which isn't a bag draw).
-    if (
-      shuffleRef.current && pending !== null &&
-      pending !== queueIndexRef.current && pending >= 0 && pending < q.length
-    ) {
-      playTrackAt(q, pending);
-      return;
-    }
     const i = pickNextIndex();
-    if (i !== null) playTrackAt(q, i);
+    if (i !== null) playTrackAt(queueRef.current, i);
   };
 
   const prev = () => {
-    // Restart current track if past 3 sec; otherwise go to previous track
+    // Restart current track if past 3 sec; otherwise go to the previous
+    // track. Since shuffle is materialized into the queue, queueIndex − 1
+    // IS the track the user just heard — same order the Up Next panel shows.
     if (pbStateRef.current.position > 3 && queueIndexRef.current >= 0) {
       invoke("seek_to", { secs: 0 }).catch(console.error);
       return;
     }
-    // Prefer the actually-played history — with shuffle on, queueIndex − 1
-    // is some unrelated track, not the one the user just heard. Entries
-    // can be stale after queue edits (guarded), and going back must NOT
-    // re-push the current index, or prev would ping-pong between two tracks.
-    const q = queueRef.current;
-    const h = playHistoryRef.current;
-    while (h.length > 0) {
-      const idx = h.pop()!;
-      if (idx >= 0 && idx < q.length && idx !== queueIndexRef.current) {
-        playTrackAt(q, idx, { pushHistory: false });
-        return;
-      }
-    }
     const i = queueIndexRef.current - 1;
-    if (i >= 0) playTrackAt(q, i, { pushHistory: false });
+    if (i >= 0) playTrackAt(queueRef.current, i);
   };
 
   // Convert library albums into UI Album objects
@@ -6369,6 +6317,12 @@ export default function App() {
       t.artist.toLowerCase().includes(q)
     );
   }, [allTracks, query]);
+
+  const filteredArtists = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return libArtists;
+    return libArtists.filter((a) => a.name.toLowerCase().includes(q));
+  }, [libArtists, query]);
 
   const currentUiId = currentLibAlbumId !== null ? `lib-${currentLibAlbumId}` : null;
 
@@ -6767,7 +6721,7 @@ export default function App() {
             <>
               <SectionHero
                 title="Artists"
-                count={libArtists.length}
+                count={filteredArtists.length}
                 unitSingular="artist"
                 unitPlural="artists"
                 right={libArtists.length > 0 ? <ViewToggle value={artistView} onChange={setArtistView} /> : null}
@@ -6775,9 +6729,9 @@ export default function App() {
               {libArtists.length === 0 && !scanning ? (
                 <EmptyLibrary onChooseFolder={addFolder} />
               ) : artistView === "grid" ? (
-                <ArtistGrid artists={libArtists} onOpen={openArtist} />
+                <ArtistGrid artists={filteredArtists} onOpen={openArtist} />
               ) : (
-                <ArtistList artists={libArtists} onOpen={openArtist} />
+                <ArtistList artists={filteredArtists} onOpen={openArtist} />
               )}
             </>
           ) : section === "tracks" ? (

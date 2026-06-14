@@ -22,14 +22,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - **Scroll-wheel volume** over the whole volume knob.
 - **`S` / `R` keyboard shortcuts** for shuffle and repeat.
 - **OS window title** reflects the playing track (taskbar / Alt-Tab).
+- **Search now filters the Artists view** (it already filtered Albums and
+  Tracks; Artists was passing the unfiltered list).
 
 ### Changed
-- **Shuffle is now a true permutation.** A Fisher-Yates bag plays every
-  track once per pass before repeating, shared by every advance path
-  (manual, auto, gapless pre-queue). Toggling shuffle / repeat re-syncs
-  the engine's pre-queued next so it takes effect at the very next
-  boundary. **Prev** respects actual play history (returns to what you
-  just heard, not queue-order − 1).
+- **Shuffle is materialized into the queue.** Turning shuffle on physically
+  shuffles the upcoming tracks, so the Up Next panel, drag-reorder, and
+  prev/next all reflect the real play order — no hidden "what plays next"
+  state. Advance is plain sequential; turning shuffle off restores album
+  order from the current track. Toggling repeat no longer reshuffles.
 - **Waveform scrubber** uses RMS bins (real dynamics instead of a
   brick), a side-by-side transport + waveform layout, and renders the
   same height as flat-bar mode.
