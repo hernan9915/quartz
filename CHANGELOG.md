@@ -5,7 +5,7 @@ All notable changes to Quartz are documented here.
 The format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] — 2026-06-14
 
 ### Added
 - **Mini player parity + transport.** The mini player now shares the

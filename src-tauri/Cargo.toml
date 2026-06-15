@@ -1,6 +1,6 @@
 [package]
 name = "quartz"
-version = "0.2.0"
+version = "0.3.0"
 description = "A bit-perfect Windows music player for your local library"
 authors = ["Hernan"]
 edition = "2021"
